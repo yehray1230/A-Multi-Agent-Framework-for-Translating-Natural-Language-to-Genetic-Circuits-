@@ -71,6 +71,7 @@ def run_reflexion_workflow(
     max_iterations: int = MAX_ITERATIONS,
     enable_ode: bool = True,
     use_multi_agent: bool = True,
+    human_feedback: str | None = None,
 ) -> tuple[bool, CircuitState]:
     """
     Dynamic state-machine workflow for Pipeline routing.
@@ -85,12 +86,14 @@ def run_reflexion_workflow(
 
     state.last_error = None
     state.host_organism = host_organism
+    if human_feedback:
+        state.human_feedback = human_feedback
 
-    if not state.rag_context.strip():
+    if not force_zero_shot and not state.rag_context.strip():
         state.last_error = "ERROR: missing RAG context."
         return False, state
 
-    if state.rag_context.startswith("ERROR:"):
+    if not force_zero_shot and state.rag_context.startswith("ERROR:"):
         state.last_error = state.rag_context
         return False, state
 
@@ -179,6 +182,7 @@ def run_reflexion_workflow(
                     output_image_path = os.path.join(rd, f"simulation_{chr(65+i)}.png")
                     sim_args = json.dumps({
                         "topology_description": topology_desc,
+                        "topology": topology if isinstance(topology, dict) else None,
                         "host_organism": state.host_organism,
                         "output_image_path": output_image_path
                     })
@@ -201,7 +205,7 @@ def run_reflexion_workflow(
                 else:
                     state.best_topology = None
                     
-                builder_output = str(state.logic_proposals) if state.logic_proposals else str(state.current_topology or "")
+                builder_output = "\n---\n".join(state.logic_proposals) if state.logic_proposals else str(state.current_topology or "")
                 
                 state.round_history.append(
                     RoundRecord(
@@ -239,7 +243,7 @@ def run_reflexion_workflow(
                 state.last_error = state.last_error or latest_feedback
                 return False, state
 
-            builder_output = str(state.logic_proposals) if state.logic_proposals else str(state.current_topology or "")
+            builder_output = "\n---\n".join(state.logic_proposals) if state.logic_proposals else str(state.current_topology or "")
             if len(state.critic_feedbacks) > prev_feedback_count:
                 state.round_history.append(
                     RoundRecord(
@@ -259,17 +263,11 @@ def run_reflexion_workflow(
                     latest_feedback or "",
                 )
 
-            print(f"\n[Critic 的最新反饋]\n{latest_feedback}")
-            print(f"[選定狀態 (Selected Topology)]\n{state.best_topology}")
-            
-            user_input = input("\n是否需要追加條件或強制拒絕？(輸入內容將退回 Builder，直接按下 Enter 則交由系統自動路由)：")
-            if user_input.strip():
-                state.human_feedback = user_input.strip()
-            else:
-                state.human_feedback = None
-
             # 優先權 1 (HITL)
             if state.human_feedback:
+                feedback = state.human_feedback
+                state.human_feedback = None
+                state.critic_feedbacks.append(f"[HUMAN_FEEDBACK] {feedback}")
                 state.is_approved = False
                 state.logic_proposals = []
                 state.verilog_codes = []
