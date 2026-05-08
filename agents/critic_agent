@@ -1,57 +1,70 @@
 from __future__ import annotations
 
 import json
+
 from schemas.state import CircuitState
 from utils.llm_utils import call_llm
 
 
 def _build_critic_prompt(state: CircuitState, *, force_zero_shot: bool) -> str:
-    system_prompt = (
-        "【角色與職責】\n"
-        f"你是一位首席合成生物學決策者（Chief Synthetic Biology Decision Maker）。你的任務是確保 Builder 提出的基因電路設計既符合「使用者的原始意圖」，又具備在標靶細胞【{state.host_organism}】上的生物物理學可行性與工程穩定性。\n\n"
-        f"【使用者的設計意圖（Target Intent）】：{state.user_intent}\n\n"
-        "【決策邏輯與多維度審查】\n"
-        "你將接收到 3 組候選基因電路的 ODE 評估數據（包含拓樸結構與模擬分數）。請依據以下邏輯進行決策：\n"
-        "1. 如果有表現達標的方案：挑選綜合分數（如 Fold Change 與穩健度）最高的一組，並核准通過。\n"
-        "2. 如果所有方案都失敗，必須進行「根因分析 (Root-cause Analysis)」並退回，且明確標註錯誤類型 (error_type)：\n"
-        "   - 若失敗主因是訊號延遲過長、層級過深、或真值表邏輯本身不符：判定為邏輯錯誤 (LOGIC_ERROR)。\n"
-        "   - 若失敗主因是特定元件毒性過高、表現量不足、RBS 匹配不佳（但邏輯層數合理）：判定為元件錯誤 (PART_ERROR)。\n"
-        "   - 若兩者皆有，或是邏輯過於龐大導致必定選用高毒性元件：判定為混合錯誤 (BOTH)。\n"
-        "   - (備註：原本的 UCF 更換機制保留，若需全盤更換宿主零件庫，可在 recommended_ucf 註明。)\n\n"
-        "【強制輸出格式】\n"
-        "你必須且只能輸出以下 JSON 格式（不可包含 Markdown 標籤，不可有額外文字）：\n"
-        "{\n"
-        '  "decision": "PASS", // 可選值: "PASS", "REVISE"\n'
-        '  "error_type": "NONE", // 可選值: "LOGIC_ERROR", "PART_ERROR", "BOTH", "NONE"\n'
-        '  "selected_index": 0, // 若 PASS，填入選中的陣列索引 (0, 1, 或 2)；若 REVISE 則填 null\n'
-        '  "recommended_ucf": "Eco1C1G1T1", // 若決定全盤更換 UCF 則填入推薦名稱，否則填 null\n'
-        '  "feedback": "詳細決策理由。若是 PART_ERROR，請在此說明哪些元件需替換，以便 Translator 套用約束..."\n'
-        "}\n"
-    )
-    
+    system_prompt = f"""You are the Chief Synthetic Biology Decision Maker.
+
+Evaluate the candidate genetic circuit topologies and their ODE simulation summaries.
+
+Target host:
+{state.host_organism}
+
+Target intent:
+{state.user_intent}
+
+Decision rules:
+- PASS only when a candidate is biologically plausible, Cello-mappable, and has acceptable ODE behavior.
+- REVISE when logic is incompatible with the intent, Cello mapping is weak, parts look implausible, or simulation results are poor.
+- Use `LOGIC_ERROR` when the Boolean/topology design is wrong.
+- Use `PART_ERROR` when Cello mapping, UCF selection, or biological part choice is the main issue.
+- Use `BOTH` when both logic and parts need changes.
+- Use `NONE` only when passing a candidate.
+- If a different UCF should be tried, set `recommended_ucf`; otherwise use null.
+
+Output only valid JSON. No Markdown.
+
+Required schema:
+{{
+  "decision": "PASS",
+  "error_type": "NONE",
+  "selected_index": 0,
+  "recommended_ucf": "Eco1C1G1T1",
+  "feedback": "short actionable explanation"
+}}
+"""
+
     if force_zero_shot:
-        system_prompt += "\n\n【初始背景】\n目前沒有可靠的靜態元件庫摘要，請直接依據模擬數據與學理進行審查。"
-    else:
-        system_prompt += f"\n\n【初始 RAG 參考】\n{state.rag_context}"
-        
+        system_prompt += "\nNo RAG context is available; rely on general Cello and synthetic biology principles.\n"
+    elif state.rag_context:
+        system_prompt += f"\nRetrieved context:\n{state.rag_context}\n"
+
     return system_prompt
 
 
 def _build_user_content(state: CircuitState) -> str:
-    content = "以下是各候選方案的拓樸結構與對應的自動化 ODE 模擬結果：\n\n"
-    
     candidate_topologies = state.candidate_topologies
     batch_simulation_results = state.batch_simulation_results
-    
+
     if not candidate_topologies or not batch_simulation_results:
-        return "ERROR: 找不到候選方案拓樸結構或模擬數據。"
-        
-    for i, (topo, sim) in enumerate(zip(candidate_topologies, batch_simulation_results)):
-        content += f"=== 候選方案 Index: {i} ===\n"
-        content += f"【拓樸結構】\n{topo}\n\n"
-        content += f"【ODE 模擬分數/結果】\n{json.dumps(sim, ensure_ascii=False, indent=2)}\n\n"
-        
-    return content
+        return "ERROR: missing candidate topologies or ODE simulation results."
+
+    sections = []
+    for index, (topology, simulation) in enumerate(zip(candidate_topologies, batch_simulation_results)):
+        sections.append(
+            "=== Candidate Index: {index} ===\n"
+            "Topology:\n{topology}\n\n"
+            "ODE simulation result:\n{simulation}\n".format(
+                index=index,
+                topology=json.dumps(topology, ensure_ascii=False, indent=2),
+                simulation=json.dumps(simulation, ensure_ascii=False, indent=2),
+            )
+        )
+    return "\n".join(sections)
 
 
 def call_critic(
@@ -63,12 +76,7 @@ def call_critic(
     force_zero_shot: bool = False,
     max_tool_rounds: int = 3,
 ) -> CircuitState:
-    
-    batch_simulation_results = state.batch_simulation_results
-    candidate_topologies = state.candidate_topologies
-    
-    # 檢查是否為空
-    if not batch_simulation_results:
+    if not state.batch_simulation_results:
         error_msg = "ERROR: No batch_simulation_results available for Critic to evaluate."
         state.critic_feedbacks.append(error_msg)
         state.is_approved = False
@@ -88,8 +96,7 @@ def call_critic(
                 user_content=user_content,
                 api_base=api_base,
             )
-            
-            # 清理可能的 Markdown 標籤，確保可以解析為 JSON
+
             cleaned_response = raw_response.strip()
             if cleaned_response.startswith("```json"):
                 cleaned_response = cleaned_response[7:]
@@ -98,49 +105,53 @@ def call_critic(
             if cleaned_response.endswith("```"):
                 cleaned_response = cleaned_response[:-3]
             cleaned_response = cleaned_response.strip()
-            
+
             parsed_json = json.loads(cleaned_response)
-            
-            # --- 解析新增的 error_type ---
-            decision = parsed_json.get("decision", "REVISE")
-            error_type = parsed_json.get("error_type", "NONE")
+            decision = str(parsed_json.get("decision", "REVISE")).upper()
+            error_type = str(parsed_json.get("error_type", "NONE")).upper()
             selected_index = parsed_json.get("selected_index")
             recommended_ucf = parsed_json.get("recommended_ucf")
             feedback = parsed_json.get("feedback", "No feedback provided.")
-            
-            # 將分類結果寫入 State
+
             state.error_type = error_type
-            
+
             if decision == "PASS" and selected_index is not None:
                 state.is_approved = True
                 try:
-                    # 將選中的拓樸寫入 state.best_topology
-                    state.best_topology = candidate_topologies[int(selected_index)]
+                    state.best_topology = state.candidate_topologies[int(selected_index)]
                 except (IndexError, ValueError, TypeError):
                     state.best_topology = None
-                    feedback = f"Warning: Valid PASS but invalid selected_index {selected_index}. {feedback}"
+                    state.is_approved = False
+                    error_type = "BOTH"
+                    state.error_type = error_type
+                    feedback = f"Critic selected invalid candidate index {selected_index}. {feedback}"
                 state.critic_feedbacks.append(feedback)
             else:
                 state.is_approved = False
-                # 將路由意圖與錯誤類型一併存入 state 供後續追蹤
                 if recommended_ucf:
-                    state.critic_feedbacks.append(f"[ROUTE: {decision}] [ERROR: {error_type}] [UCF: {recommended_ucf}] {feedback}")
+                    state.critic_feedbacks.append(
+                        f"[ROUTE: {decision}] [ERROR: {error_type}] [UCF: {recommended_ucf}] {feedback}"
+                    )
+                    state.current_ucf = str(recommended_ucf)
                 else:
                     state.critic_feedbacks.append(f"[ROUTE: {decision}] [ERROR: {error_type}] {feedback}")
-                
-            # 成功解析則跳出重試迴圈
+
+            state.last_error = None
             break
-            
-        except json.JSONDecodeError as e:
+
+        except json.JSONDecodeError as exc:
             if attempt == max_retries - 1:
-                error_msg = f"ERROR: Critic failed to output valid JSON after {max_retries} attempts."
+                error_msg = f"ERROR: Critic failed to output valid JSON after {max_retries} attempts: {exc}"
                 state.critic_feedbacks.append(error_msg)
                 state.is_approved = False
                 state.last_error = error_msg
             else:
-                user_content += f"\n\nSystem Error: Failed to parse your response as JSON ({str(e)}). Please output ONLY valid JSON without Markdown tags."
-        except Exception as e:
-            error_msg = f"ERROR: critic execution failed: {str(e)}"
+                user_content += (
+                    f"\n\nYour last response was not valid JSON ({exc}). "
+                    "Return only the required JSON object."
+                )
+        except Exception as exc:
+            error_msg = f"ERROR: critic execution failed: {exc}"
             state.critic_feedbacks.append(error_msg)
             state.is_approved = False
             state.last_error = error_msg
