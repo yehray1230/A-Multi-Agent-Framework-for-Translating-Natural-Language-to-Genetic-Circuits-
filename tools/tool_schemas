@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from tools.ode_simulator import HOST_BASELINES, run_ode_simulation
+from tools.ode_simulator import get_host_baseline, normalize_topology_for_ode, resolve_host_baseline_key, run_ode_simulation
 from vector_db import DEFAULT_EMBED_MODEL_NAME, search_parts
 
 
@@ -54,12 +54,7 @@ def _normalize_host_name(host_organism: str) -> str:
 
 
 def _resolve_host_baseline_key(host_organism: str) -> str:
-    normalized = _normalize_host_name(host_organism)
-    if normalized == "Bacillus subtilis":
-        return "Bacillus subtilis (?航?獢輯?)"
-    if normalized == "Saccharomyces cerevisiae":
-        return "Saccharomyces cerevisiae (??瘥?"
-    return "Escherichia coli (憭扯獢輯?)"
+    return resolve_host_baseline_key(host_organism)
 
 
 def _build_lightweight_topology(topology_description: str) -> dict[str, Any]:
@@ -161,16 +156,30 @@ def execute_run_ode_simulation_tool(arguments_json: str) -> str:
         return f"TOOL_ERROR: JSON 解析失敗: {exc}"
 
     topology_description = str(args.get("topology_description", "")).strip()
+    topology_payload = args.get("topology")
     focus = str(args.get("focus", "stability")).strip().lower() or "stability"
     normalized_host = _normalize_host_name(str(args.get("host_organism", "Escherichia coli")))
     baseline_key = _resolve_host_baseline_key(normalized_host)
     output_image_path = args.get("output_image_path", None)
 
-    if not topology_description:
+    if not topology_description and topology_payload is None:
         return "TOOL_ERROR: topology_description 不可為空。"
 
-    topology = _build_lightweight_topology(topology_description)
-    params = dict(HOST_BASELINES.get(baseline_key, HOST_BASELINES["Escherichia coli (憭扯獢輯?)"]))
+    topology = None
+    if isinstance(topology_payload, dict):
+        topology = normalize_topology_for_ode(topology_payload)
+    elif topology_description:
+        try:
+            parsed_topology = json.loads(topology_description)
+            if isinstance(parsed_topology, dict) and "species" in parsed_topology:
+                topology = normalize_topology_for_ode(parsed_topology)
+        except Exception:
+            topology = None
+
+    if topology is None:
+        topology = _build_lightweight_topology(topology_description)
+
+    params = dict(get_host_baseline(baseline_key))
 
     if focus == "leakage":
         params["leakage"] = 0.08
