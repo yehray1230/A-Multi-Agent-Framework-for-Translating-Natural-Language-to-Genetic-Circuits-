@@ -555,10 +555,12 @@ def main():
                         mc_ode_results = [{} for _ in range(NUM_SAMPLES)]
                         with st.spinner(f"正在執行蒙地卡羅多狀態批次 ODE 模擬 ({NUM_SAMPLES} 組變異)..." if NUM_SAMPLES > 1 and noise_level > 0.0 else "正在執行單次確定性 ODE 模擬..."):
                             for vec in tv_result["test_vectors"]:
-                                state_name = vec.pop("state_name")
+                                state_name = vec["state_name"]
                                 # 組裝 stimulus_curves (使用恆定大數值 5000 模擬 1, 0 模擬 0)
                                 stim_dict = {}
                                 for ind_name, bool_val in vec.items():
+                                    if ind_name == "state_name":
+                                        continue
                                     stim_dict[ind_name] = {"type": "pulse", "start": 0, "duration": 100000, "amp": 50000.0 if bool_val > 0 else 0.0}
                                 
                                 # 使用預設空參數即可 (會 fall back 到通用設定)
@@ -768,19 +770,18 @@ def main():
             import plotly.graph_objects as go
             import numpy as np
             
+            valid_dfs = [df for df in dfs if not df.empty and "Time" in df.columns]
             fig = go.Figure()
-            if dfs and not dfs[0].empty:
-                time_arr = dfs[0]["Time"].values
-                species_cols = [c for c in dfs[0].columns if c != "Time"]
+            if valid_dfs:
+                time_arr = valid_dfs[0]["Time"].values
+                species_cols = [c for c in valid_dfs[0].columns if c != "Time" and not c.startswith("ODE_ERROR")]
                 
                 colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52']
                 
                 # 平均值軌跡矩陣
                 sum_dfs = {col: np.zeros(len(time_arr)) for col in species_cols}
                 
-                for df_run in dfs:
-                    if df_run.empty:
-                        continue
+                for df_run in valid_dfs:
                     df_safe = df_run.copy()
                     for c in species_cols:
                         # 箝位防止 log(0)
@@ -796,7 +797,7 @@ def main():
                         ))
                 
                 # 繪製粗體平均線
-                active_dfs_count = len([d for d in dfs if not d.empty])
+                active_dfs_count = len(valid_dfs)
                 if active_dfs_count > 0:
                     for c in species_cols:
                         mean_val = sum_dfs[c] / active_dfs_count
@@ -816,7 +817,8 @@ def main():
                 
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.error("所有模擬皆失敗。請檢查參數。")
+                err_msg = dfs[0]["ODE_ERROR"].iloc[0] if dfs and "ODE_ERROR" in dfs[0].columns else "未知錯誤"
+                st.error(f"所有模擬皆發散或崩潰。錯誤細節：{err_msg}")
 
 
 if __name__ == "__main__":
