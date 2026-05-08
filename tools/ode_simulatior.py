@@ -47,6 +47,94 @@ HOST_BASELINES = {
     }
 }
 
+DEFAULT_HOST_BASELINE_KEY = "Escherichia coli (大腸桿菌)"
+
+HOST_BASELINE_ALIASES = {
+    "escherichia coli": DEFAULT_HOST_BASELINE_KEY,
+    "e. coli": DEFAULT_HOST_BASELINE_KEY,
+    "ecoli": DEFAULT_HOST_BASELINE_KEY,
+    "bacillus subtilis": "Bacillus subtilis (枯草桿菌)",
+    "b. subtilis": "Bacillus subtilis (枯草桿菌)",
+    "saccharomyces cerevisiae": "Saccharomyces cerevisiae (釀酒酵母)",
+    "s. cerevisiae": "Saccharomyces cerevisiae (釀酒酵母)",
+    "yeast": "Saccharomyces cerevisiae (釀酒酵母)",
+}
+
+
+def resolve_host_baseline_key(host_organism: str | None) -> str:
+    """Resolve UI labels, English names, and legacy mojibake strings to a stable baseline key."""
+    host_text = str(host_organism or "").strip()
+    if host_text in HOST_BASELINES:
+        return host_text
+
+    host_lower = host_text.lower()
+    for alias, baseline_key in HOST_BASELINE_ALIASES.items():
+        if alias in host_lower:
+            return baseline_key
+
+    return DEFAULT_HOST_BASELINE_KEY
+
+
+def get_host_baseline(host_organism: str | None) -> dict:
+    return HOST_BASELINES[resolve_host_baseline_key(host_organism)]
+
+
+def normalize_topology_for_ode(topology: dict | None) -> dict | None:
+    if topology is None:
+        return None
+
+    normalized = dict(topology)
+    species = []
+    species_metadata = {}
+    for item in normalized.get("species", []):
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("gate_name") or item.get("protein") or item.get("id") or "").strip()
+            metadata = {k: v for k, v in item.items() if k != "name"}
+        else:
+            name = str(item or "").strip()
+            metadata = {}
+        if not name:
+            continue
+        if name not in species:
+            species.append(name)
+        if metadata:
+            species_metadata.setdefault(name, {}).update(metadata)
+
+    normalized["species"] = species
+    if species_metadata:
+        existing_metadata = normalized.get("species_metadata", {})
+        if isinstance(existing_metadata, dict):
+            existing_metadata = dict(existing_metadata)
+            for name, metadata in species_metadata.items():
+                existing_metadata.setdefault(name, {}).update(metadata)
+            normalized["species_metadata"] = existing_metadata
+        else:
+            normalized["species_metadata"] = species_metadata
+
+    interactions = []
+    for interaction in normalized.get("interactions", []):
+        if not isinstance(interaction, dict):
+            continue
+        source = interaction.get("source")
+        target = interaction.get("target")
+        if isinstance(source, dict):
+            source = source.get("name") or source.get("gate_name") or source.get("protein") or source.get("id")
+        if isinstance(target, dict):
+            target = target.get("name") or target.get("gate_name") or target.get("protein") or target.get("id")
+        source = str(source or "").strip()
+        target = str(target or "").strip()
+        if not source or not target:
+            continue
+        item = dict(interaction)
+        item["source"] = source
+        item["target"] = target
+        item["type"] = str(item.get("type") or "expression").lower()
+        interactions.append(item)
+
+    normalized["interactions"] = interactions
+    normalized.setdefault("inducers", {})
+    return normalized
+
 TIME_CONVERSION = {
     "s": 1.0,
     "sec": 1.0,
@@ -262,7 +350,7 @@ Please extract or estimate the following parameters. Output ONLY a JSON dictiona
         
     except Exception as e:
         # LLM 解析失敗或 API 錯誤時的保險機制 (Fallback)
-        baseline = HOST_BASELINES.get(host_organism, HOST_BASELINES["Escherichia coli (大腸桿菌)"])
+        baseline = get_host_baseline(host_organism)
         params = baseline.copy()
         params["km_rnap"] = 100.0
         params["km_ribo"] = 500.0
@@ -289,7 +377,7 @@ async def resolve_missing_parameters(missing_keys: list[str], context_parts: lis
     res = await loop.run_in_executor(None, sync_miner)
     mined_params = res.get("params", {})
     
-    baseline = HOST_BASELINES.get(host_organism, HOST_BASELINES["Escherichia coli (大腸桿菌)"])
+    baseline = get_host_baseline(host_organism)
     
     resolved = {}
     for key in missing_keys:
@@ -357,6 +445,7 @@ def circuit_dynamics(t, y, params, stimulus_funcs, topology):
     動態核心 ODE 函數。
     確保時間變數 t 能實時影響外部輸入 X(t)。
     """
+    topology = normalize_topology_for_ode(topology) or {"species": [], "interactions": []}
     species = topology.get("species", [])
     num_species = len(species)
     interactions = topology.get("interactions", [])
@@ -375,9 +464,13 @@ def circuit_dynamics(t, y, params, stimulus_funcs, topology):
     activations = {s: [] for s in species}
     for interaction in interactions:
         if interaction.get("type", "").lower() in ["repression", "repress"]:
-            repressions[interaction["target"]].append(interaction["source"])
+            target = interaction.get("target")
+            if target in repressions:
+                repressions[target].append(interaction.get("source"))
         elif interaction.get("type", "").lower() in ["activation", "activate"]:
-            activations[interaction["target"]].append(interaction["source"])
+            target = interaction.get("target")
+            if target in activations:
+                activations[target].append(interaction.get("source"))
             
     # 1. 取得總體資源與設定
     total_rnap = params.get("total_rnap", 50.0)
@@ -394,6 +487,8 @@ def circuit_dynamics(t, y, params, stimulus_funcs, topology):
         
         # 使用 Hill Function 模擬多重抑制
         for repressor in repressions[target_species]:
+            if repressor not in species:
+                continue
             rep_idx = species.index(repressor)
             rep_conc = proteins[rep_idx]
             
@@ -412,6 +507,8 @@ def circuit_dynamics(t, y, params, stimulus_funcs, topology):
             
         # 處理活化項 (如果有的話)
         for activator in activations[target_species]:
+            if activator not in species:
+                continue
             act_idx = species.index(activator)
             act_conc = proteins[act_idx]
             # 活化 Hill: (A/Kd)^n / (1 + (A/Kd)^n)
@@ -497,6 +594,11 @@ def run_ode_simulation(params: dict, topology: dict = None, stimulus_curves: dic
             stimulus_curves = {
                 "IPTG": "20000: 50000 * exp(-0.0001 * (t - 20000))",
             }
+    else:
+        topology = normalize_topology_for_ode(topology)
+
+    if not topology.get("species"):
+        raise ValueError("Topology must contain at least one ODE species name.")
             
     if stimulus_curves is None:
         stimulus_curves = topology.get("dynamic_inducers", {})
@@ -577,7 +679,7 @@ def generate_noisy_parameters(base_params: dict, variance: float = 0.15, num_sam
     for _ in range(num_samples):
         noisy_param = {}
         for k, v in base_params.items():
-            if isinstance(v, (float, int)):
+            if isinstance(v, (float, int)) and not isinstance(v, bool):
                 if variance > 0.0:
                     # 簡單的高斯分佈擾動，平均 1.0, 變異 variance
                     noise_multiplier = np.random.normal(1.0, variance)
@@ -600,15 +702,11 @@ def _core_run_monte_carlo_ode_simulation(base_params: dict, topology: dict, stim
             return run_ode_simulation(p, topology, stimulus_curves)
         except Exception as e:
             print(f"Simulation failed for params: {e}")
-            return pd.DataFrame()
+            return pd.DataFrame({"ODE_ERROR": [str(e)]})
             
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, num_samples)) as executor:
-        # submit order doesn't matter since we just need 50 dfs
-        futures = [executor.submit(sim_worker, p) for p in noisy_params_list]
-        for f in concurrent.futures.as_completed(futures):
-            res_df = f.result()
-            if not res_df.empty:
-                results.append(res_df)
+        # submit order matters to keep the same variation profile for different test vectors
+        results = list(executor.map(sim_worker, noisy_params_list))
                 
     return results
 
