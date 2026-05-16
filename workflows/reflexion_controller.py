@@ -1,5 +1,8 @@
 import logging
 import uuid
+from typing import Any
+
+from benchmark_suite.benchmark_controller import evaluate_candidate
 from schemas.state import DesignState, SearchNode
 
 # Assuming agent imports are handled by an app or factory, 
@@ -21,9 +24,49 @@ def _topology_summary(topology: dict | None) -> dict:
         "ode_status",
         "dynamic_margin",
         "gate_count",
+        "metabolic_burden_score",
+        "complexity_penalty",
+        "robustness_score",
+        "collapsed",
+        "robustness_collapsed",
+        "signal_to_noise_ratio",
+        "snr",
+        "monte_carlo_runs",
+        "monte_carlo_samples",
+        "temporal_score",
+        "rise_time",
+        "weighted_total_score",
+        "orthogonality_score",
+        "cello_assignment_score",
+        "cello_buildable",
+        "toxicity",
+        "toxicity_score",
+        "semantic_faithfulness_score",
+        "missed_edge_cases",
+        "scoring_model",
         "verilog_index",
     ]
     return {key: topology[key] for key in summary_keys if key in topology}
+
+
+def _apply_weighted_benchmark(topology: dict[str, Any]) -> None:
+    existing_report = topology.get("benchmark_report")
+    if not isinstance(existing_report, dict):
+        existing_report = {}
+    weighted_report = evaluate_candidate(topology)
+    existing_details = existing_report.get("details", [])
+    weighted_details = weighted_report.get("details", [])
+    if not isinstance(existing_details, list):
+        existing_details = []
+    if not isinstance(weighted_details, list):
+        weighted_details = []
+
+    topology.update(weighted_report)
+    topology["benchmark_report"] = {
+        **weighted_report,
+        "details": existing_details + weighted_details,
+        "ode_report": existing_report,
+    }
 
 
 def _record_failed_attempt(state: DesignState, node: SearchNode) -> None:
@@ -31,6 +74,19 @@ def _record_failed_attempt(state: DesignState, node: SearchNode) -> None:
         "node_id": node.node_id,
         "search_mode": node.search_mode,
         "score": node.score,
+        "metabolic_burden_score": node.metabolic_burden_score,
+        "gate_count": node.gate_count,
+        "complexity_penalty": node.complexity_penalty,
+        "robustness_score": node.robustness_score,
+        "signal_to_noise_ratio": node.signal_to_noise_ratio,
+        "monte_carlo_runs": node.monte_carlo_runs,
+        "temporal_score": node.temporal_score,
+        "rise_time": node.rise_time,
+        "orthogonality_score": node.orthogonality_score,
+        "cello_assignment_score": node.cello_assignment_score,
+        "cello_buildable": node.cello_buildable,
+        "semantic_faithfulness_score": node.semantic_faithfulness_score,
+        "missed_edge_cases": node.missed_edge_cases,
         "error_type": node.error_type,
         "feedback": _latest_feedback(node),
         "best_topology": _topology_summary(node.best_topology),
@@ -149,6 +205,9 @@ def run_reflexion_workflow(
                 continue
 
         state = batch_ode_simulator.run(state)
+
+        for topo in node.candidate_topologies:
+            _apply_weighted_benchmark(topo)
         
         # Evaluate Best Topology inside the node
         best_topo = None
@@ -158,8 +217,9 @@ def run_reflexion_workflow(
                 best_score = topo.get("score", -9999)
                 best_topo = topo
                 
-        node.score = best_score
         node.best_topology = best_topo
+        node.score = best_score
+        node.sync_evaluation_metrics(best_topo)
         if best_topo:
             state.best_topology = best_topo
             

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import numpy as np
+
+from benchmark_suite.kinetic_scorer import score_kinetic
 from agents.data_miner_agent import DataMinerAgent
 from schemas.state import DesignState, SearchNode
-from tools.ode_simulator import BatchODESimulator
+from tools.ode_simulator import BatchODESimulator, _perturb_biokinetic_parameters
 from utils.unit_conversion import normalize_biokinetic_value
 from workflows.reflexion_controller import run_reflexion_workflow
 
@@ -22,10 +25,19 @@ def test_ode_simulator_marks_topology_simulated_and_outputs_metrics() -> None:
 
     assert topology["ode_status"] == "simulated"
     assert 0.0 <= topology["kinetic_score"] <= 1.0
+    assert 0.0 <= topology["robustness_score"] <= 1.0
+    assert topology["signal_to_noise_ratio"] >= 0.0
+    assert topology["monte_carlo_runs"] == 1
     assert "metrics_max_burden" in topology
     assert "metrics_cv" in topology
     assert "resource_occupancy" in topology
     assert "benchmark_report" in topology
+    assert topology["benchmark_report"]["robustness_score"] == topology["robustness_score"]
+    assert topology["benchmark_report"]["signal_to_noise_ratio"] == topology["signal_to_noise_ratio"]
+    assert topology["benchmark_report"]["monte_carlo_runs"] == 1
+    assert topology["benchmark_report"]["orthogonality_score"] == 1.0
+    assert topology["benchmark_report"]["cello_assignment_score"] == 0.0
+    assert topology["benchmark_report"]["cello_buildable"] is False
 
 
 def test_burden_increases_and_score_drops_with_more_genes() -> None:
@@ -148,6 +160,42 @@ def test_ode_simulator_can_run_monte_carlo_stress_test() -> None:
     assert any(detail["metric"] == "monte_carlo" for detail in topology["benchmark_report"]["details"])
 
 
+def test_noise_perturbation_keeps_biochemical_parameters_non_negative() -> None:
+    perturbed = _perturb_biokinetic_parameters(
+        {
+            "transcription_rate": 0.08,
+            "translation_rate": 0.045,
+            "kd": 50.0,
+            "hill_coefficient": 2.0,
+            "y_min": 0.02,
+            "y_max": 1.0,
+        },
+        noise_level=10.0,
+        rng=np.random.default_rng(7),
+    )
+
+    assert all(value >= 0.0 for value in perturbed.values())
+
+
+def test_kinetic_scorer_runs_noisy_monte_carlo_robustness() -> None:
+    result = score_kinetic(
+        {
+            "verilog": "module c(input A, output Y); assign Y = A; endmodule",
+            "gate_count": 1,
+            "monte_carlo_runs": 4,
+            "noise_level": 0.1,
+            "simulation_time": 80.0,
+            "sample_count": 16,
+        }
+    )
+
+    assert result.details["status"] == "ok"
+    assert result.monte_carlo_runs == 4
+    assert result.signal_to_noise_ratio >= 0.0
+    assert 0.0 <= result.robustness_score <= 1.0
+    assert result.score == result.robustness_score
+
+
 class _NoopAgent:
     kwargs: dict = {}
 
@@ -220,7 +268,7 @@ def test_workflow_calls_data_miner_between_cello_and_ode() -> None:
     data_miner = _DataMinerRecorder()
     ode = _OdeRecorder()
 
-    run_reflexion_workflow(
+    state = run_reflexion_workflow(
         DesignState(user_intent="A", compute_budget=1),
         builder=_BuilderStub(),
         translator=_TranslatorStub(),
@@ -234,6 +282,10 @@ def test_workflow_calls_data_miner_between_cello_and_ode() -> None:
 
     assert data_miner.called is True
     assert ode.saw_parameters is True
+    topology = state.tree_nodes["root"].candidate_topologies[0]
+    assert topology["scoring_model"] == "weighted_total_score"
+    assert "weighted_total_score" in topology
+    assert topology["benchmark_report"]["scoring_model"] == "weighted_total_score"
 
 
 def test_workflow_remains_compatible_without_data_miner() -> None:
@@ -252,3 +304,5 @@ def test_workflow_remains_compatible_without_data_miner() -> None:
 
     assert ode.saw_parameters is False
     assert state.failed_attempts[0]["error_type"] == "PART_ERROR"
+    assert "orthogonality_score" in state.failed_attempts[0]
+    assert "cello_buildable" in state.failed_attempts[0]

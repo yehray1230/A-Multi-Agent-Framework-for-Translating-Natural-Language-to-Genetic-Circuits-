@@ -8,6 +8,26 @@ from utils.llm_utils import call_llm
 VALID_ERROR_TYPES = {"LOGIC_ERROR", "PART_ERROR", "BOTH", "NONE"}
 PASS_SCORE_THRESHOLD = 0.80
 FAIL_SCORE_THRESHOLD = 0.60
+METABOLIC_BURDEN_THRESHOLD = 0.70
+METABOLIC_BURDEN_GUIDANCE = (
+    "當前基因電路設計過於複雜，會對宿主細胞造成過高的代謝負擔，"
+    "請嘗試使用卡諾圖化簡或合併邏輯閘來精簡 Verilog 代碼"
+)
+ROBUSTNESS_THRESHOLD = 0.75
+ROBUSTNESS_GUIDANCE = (
+    "動態強健性測試失敗：當前電路在生化參數發生高斯擾動時，ON/OFF 狀態的訊號邊界會模糊甚至重疊。"
+    "請考慮：(1) 更換具有更陡峭 Hill Function（非線性更強）的邏輯閘元件，"
+    "(2) 確保上游推動下游的訊號餘裕（Margin）足夠大，避免級聯訊號衰減。"
+)
+
+
+ORTHOGONALITY_THRESHOLD = 0.20
+SEMANTIC_FAITHFULNESS_THRESHOLD = 0.90
+CELLO_UCF_GUIDANCE = (
+    "違反 Cello UCF 實體約束：當前電路拓樸無法被現有的生物元件庫滿足"
+    "（可能發生 Crosstalk 或缺少足夠的正交阻遏蛋白）。請嘗試改變邏輯架構，"
+    "例如使用不同的邏輯閘組合（De Morgan's laws）來繞過元件數量的限制。"
+)
 
 
 def _extract_score(best_topo: dict | None) -> float | None:
@@ -38,7 +58,212 @@ def _benchmark_report(best_topo: dict | None) -> dict:
     report["mapping_status"] = best_topo.get("mapping_status", report.get("mapping_status", "unknown"))
     report["ode_status"] = best_topo.get("ode_status", report.get("ode_status", "unknown"))
     report["details"] = report.get("details", best_topo.get("details", []))
+    for key in (
+        "metabolic_burden_score",
+        "gate_count",
+        "complexity_penalty",
+        "robustness_score",
+        "collapsed",
+        "robustness_collapsed",
+        "signal_to_noise_ratio",
+        "snr",
+        "monte_carlo_runs",
+        "monte_carlo_samples",
+        "weighted_total_score",
+        "orthogonality_score",
+        "cello_assignment_score",
+        "cello_buildable",
+        "toxicity",
+        "toxicity_score",
+        "semantic_faithfulness_score",
+        "missed_edge_cases",
+        "missed_conditions",
+    ):
+        if key not in report and key in best_topo:
+            report[key] = best_topo[key]
     return report
+
+
+def _extract_metabolic_burden_score(report: dict) -> float | None:
+    score = report.get("metabolic_burden_score")
+    if score is None:
+        for detail in report.get("details", []):
+            if not isinstance(detail, dict):
+                continue
+            if detail.get("metric") == "metabolic_burden":
+                score = detail.get("metabolic_burden_score", detail.get("score"))
+                break
+    try:
+        return None if score is None else float(score)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_robustness_score(report: dict) -> float | None:
+    score = report.get("robustness_score")
+    if score is None:
+        for detail in report.get("details", []):
+            if not isinstance(detail, dict):
+                continue
+            if detail.get("metric") in {"kinetic", "robustness"}:
+                score = detail.get("robustness_score", detail.get("score"))
+                if score is not None:
+                    break
+    try:
+        return None if score is None else float(score)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_orthogonality_score(report: dict) -> float | None:
+    score = report.get("orthogonality_score")
+    if score is None:
+        for detail in report.get("details", []):
+            if not isinstance(detail, dict):
+                continue
+            if detail.get("metric") in {"cello_constraints", "orthogonality"}:
+                score = detail.get("orthogonality_score", detail.get("score"))
+                if score is not None:
+                    break
+    try:
+        return None if score is None else float(score)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_cello_buildable(report: dict) -> bool | None:
+    value = report.get("cello_buildable")
+    if value is None:
+        mapping_status = str(report.get("mapping_status", "")).lower()
+        if mapping_status in {"mapped", "success", "successful"}:
+            return True
+        if mapping_status in {"failed", "mapping_failed", "unmapped"}:
+            return False
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "mapped", "success", "successful"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "failed", "unmapped"}:
+            return False
+        return None
+    return bool(value)
+
+
+SEMANTIC_FAITHFULNESS_GUIDANCE_TEMPLATE = (
+    "邏輯保真度缺失：你的 Verilog 代碼在物理上可能可行，但並未完全符合使用者的初始需求。"
+    "你遺漏了以下邊界條件：{missed_edge_cases}。請修改 Verilog 邏輯以涵蓋這些情況。"
+)
+
+
+def _extract_semantic_faithfulness_score(report: dict) -> float | None:
+    score = report.get("semantic_faithfulness_score")
+    if score is None:
+        for detail in report.get("details", []):
+            if not isinstance(detail, dict):
+                continue
+            if detail.get("metric") == "semantic_faithfulness":
+                score = detail.get("semantic_faithfulness_score", detail.get("score"))
+                if score is not None:
+                    break
+    try:
+        return None if score is None else float(score)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_missed_edge_cases(report: dict) -> list[str]:
+    missed = report.get("missed_edge_cases", report.get("missed_conditions"))
+    if missed is None:
+        for detail in report.get("details", []):
+            if not isinstance(detail, dict):
+                continue
+            if detail.get("metric") == "semantic_faithfulness":
+                missed = detail.get("missed_edge_cases", detail.get("missed_conditions"))
+                if missed is not None:
+                    break
+    if isinstance(missed, list):
+        return [str(item) for item in missed if str(item).strip()]
+    if isinstance(missed, tuple):
+        return [str(item) for item in missed if str(item).strip()]
+    if isinstance(missed, str) and missed.strip():
+        return [missed]
+    return []
+
+
+def _has_signal_overlap(report: dict) -> bool:
+    collapsed = report.get("robustness_collapsed", report.get("collapsed"))
+    if collapsed is not None:
+        return bool(collapsed)
+    for detail in report.get("details", []):
+        if not isinstance(detail, dict):
+            continue
+        if detail.get("metric") in {"kinetic", "robustness", "monte_carlo"}:
+            if detail.get("collapsed") is not None:
+                return bool(detail["collapsed"])
+            try:
+                min_signal = detail.get("min_signal")
+                max_noise = detail.get("max_noise")
+                if min_signal is not None and max_noise is not None:
+                    return float(max_noise) >= float(min_signal)
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
+def _ensure_metabolic_burden_guidance(feedback: str, metabolic_score: float | None) -> str:
+    if metabolic_score is None or metabolic_score >= METABOLIC_BURDEN_THRESHOLD:
+        return feedback
+    if METABOLIC_BURDEN_GUIDANCE in feedback:
+        return feedback
+    return f"{feedback}\n{METABOLIC_BURDEN_GUIDANCE}" if feedback else METABOLIC_BURDEN_GUIDANCE
+
+
+def _ensure_robustness_guidance(
+    feedback: str,
+    robustness_score: float | None,
+    signal_overlap: bool,
+) -> str:
+    if not signal_overlap and (robustness_score is None or robustness_score >= ROBUSTNESS_THRESHOLD):
+        return feedback
+    if ROBUSTNESS_GUIDANCE in feedback:
+        return feedback
+    return f"{feedback}\n{ROBUSTNESS_GUIDANCE}" if feedback else ROBUSTNESS_GUIDANCE
+
+
+def _ensure_cello_ucf_guidance(
+    feedback: str,
+    cello_buildable: bool | None,
+    orthogonality_score: float | None,
+) -> str:
+    if cello_buildable is not False and (
+        orthogonality_score is None or orthogonality_score > ORTHOGONALITY_THRESHOLD
+    ):
+        return feedback
+    if CELLO_UCF_GUIDANCE in feedback:
+        return feedback
+    return f"{feedback}\n{CELLO_UCF_GUIDANCE}" if feedback else CELLO_UCF_GUIDANCE
+
+
+def _ensure_semantic_faithfulness_guidance(
+    feedback: str,
+    semantic_faithfulness_score: float | None,
+    missed_edge_cases: list[str],
+) -> str:
+    if (
+        semantic_faithfulness_score is None
+        or semantic_faithfulness_score >= SEMANTIC_FAITHFULNESS_THRESHOLD
+        or not missed_edge_cases
+    ):
+        return feedback
+    guidance = SEMANTIC_FAITHFULNESS_GUIDANCE_TEMPLATE.format(
+        missed_edge_cases="；".join(missed_edge_cases)
+    )
+    if guidance in feedback:
+        return feedback
+    return f"{feedback}\n{guidance}" if feedback else guidance
 
 
 def _routing_target(error_type: str) -> str:
@@ -76,18 +301,44 @@ class CriticAgent(AgentProtocol):
 
         benchmark_report = _benchmark_report(best_topo)
         observed_score = _extract_score(best_topo)
+        metabolic_burden_score = _extract_metabolic_burden_score(benchmark_report)
+        robustness_score = _extract_robustness_score(benchmark_report)
+        orthogonality_score = _extract_orthogonality_score(benchmark_report)
+        cello_buildable = _extract_cello_buildable(benchmark_report)
+        semantic_faithfulness_score = _extract_semantic_faithfulness_score(benchmark_report)
+        missed_edge_cases = _extract_missed_edge_cases(benchmark_report)
+        signal_overlap = _has_signal_overlap(benchmark_report)
 
         system_prompt = f"""You are a rigorous Synthetic Biology Critic Agent.
 Your job is to evaluate the Builder's logic proposal, generated topology, and benchmark report.
 
 Benchmark report contract:
 - `score` is normalized from 0 to 1.
+- `metabolic_burden_score` is normalized from 0 to 1; lower means the circuit likely uses too many gates and burdens the host.
+- `robustness_score` is normalized from 0 to 1; lower means noisy biochemical parameter perturbations make ON/OFF states unreliable.
+- `orthogonality_score` is normalized from 0 to 1; very low values mean the biological parts cannot remain independent enough for the topology.
+- `cello_assignment_score` is normalized from 0 to 1 and records Cello's gate assignment quality.
+- `cello_buildable=false` means Cello failed UCF constraints or could not generate a DNA-buildable design.
+- `semantic_faithfulness_score` is normalized from 0 to 1; lower means the Verilog missed explicit or implicit user requirements.
+- `missed_edge_cases` lists requirement conditions that the Verilog did not cover.
 - If score < {FAIL_SCORE_THRESHOLD:.2f}, the design MUST fail with is_approved=false.
 - If score >= {PASS_SCORE_THRESHOLD:.2f}, approve only when the logic also matches the user intent and the mapped topology is usable.
 - Scores between {FAIL_SCORE_THRESHOLD:.2f} and {PASS_SCORE_THRESHOLD:.2f} require a clear routing decision.
+- If `metabolic_burden_score` is below {METABOLIC_BURDEN_THRESHOLD:.2f}, mark the design as not approved, route feedback to Builder, and the feedback MUST include this exact guidance:
+  "{METABOLIC_BURDEN_GUIDANCE}"
+- If `robustness_score` is below {ROBUSTNESS_THRESHOLD:.2f}, or if benchmark details report `collapsed=true` / ON-OFF signal overlap, mark the design as not approved, route feedback to Builder, and the feedback MUST include this exact guidance:
+  "{ROBUSTNESS_GUIDANCE}"
+- If `cello_buildable` is false or `orthogonality_score` is at or below {ORTHOGONALITY_THRESHOLD:.2f}, mark the design as not approved, route feedback to Builder, and the feedback MUST include this exact guidance:
+  "{CELLO_UCF_GUIDANCE}"
+- If `semantic_faithfulness_score` is below {SEMANTIC_FAITHFULNESS_THRESHOLD:.2f} and `missed_edge_cases` is non-empty, mark the design as not approved, route feedback to Builder, and precisely identify the missed edge cases using this template:
+  "{SEMANTIC_FAITHFULNESS_GUIDANCE_TEMPLATE}"
 
 Routing rules:
 - Functional score is low, truth table does not satisfy intent, Boolean expression is wrong, or intent is misunderstood -> LOGIC_ERROR.
+- Excessive logic gates or low metabolic_burden_score -> LOGIC_ERROR, because Builder must simplify Boolean logic or Verilog structure.
+- Low robustness_score or ON/OFF signal overlap under Gaussian perturbation -> LOGIC_ERROR, because Builder must improve circuit architecture and signal margin.
+- Low semantic_faithfulness_score with missed_edge_cases -> LOGIC_ERROR, because Builder or Translator must modify Verilog logic to cover the original user requirement.
+- Failed Cello UCF buildability, severe crosstalk, not enough gates, or very low orthogonality_score -> LOGIC_ERROR, because Builder must change the logic architecture or gate composition.
 - Logic is acceptable but Cello mapping failed, kinetic/static plausibility is low, toxicity/part constraints are violated, or ODE dynamics are poor -> PART_ERROR.
 - Logic and physical implementation are both problematic -> BOTH.
 - Everything is acceptable -> NONE and is_approved=true.
@@ -153,11 +404,55 @@ You MUST output ONLY a valid JSON object matching this schema:
                     error_type = "PART_ERROR"
 
                 feedback = data.get("feedback", "No feedback provided.")
+                feedback = _ensure_metabolic_burden_guidance(feedback, metabolic_burden_score)
+                feedback = _ensure_robustness_guidance(feedback, robustness_score, signal_overlap)
+                feedback = _ensure_cello_ucf_guidance(feedback, cello_buildable, orthogonality_score)
+                feedback = _ensure_semantic_faithfulness_guidance(
+                    feedback,
+                    semantic_faithfulness_score,
+                    missed_edge_cases,
+                )
+                if metabolic_burden_score is not None and metabolic_burden_score < METABOLIC_BURDEN_THRESHOLD:
+                    is_approved = False
+                    if error_type in {"NONE", "PART_ERROR"}:
+                        error_type = "LOGIC_ERROR"
+                robustness_failed = signal_overlap or (
+                    robustness_score is not None and robustness_score < ROBUSTNESS_THRESHOLD
+                )
+                if robustness_failed:
+                    is_approved = False
+                    if error_type in {"NONE", "PART_ERROR"}:
+                        error_type = "LOGIC_ERROR"
+                cello_ucf_failed = cello_buildable is False or (
+                    orthogonality_score is not None
+                    and orthogonality_score <= ORTHOGONALITY_THRESHOLD
+                )
+                if cello_ucf_failed:
+                    is_approved = False
+                    if error_type in {"NONE", "PART_ERROR"}:
+                        error_type = "LOGIC_ERROR"
+                semantic_failed = (
+                    semantic_faithfulness_score is not None
+                    and semantic_faithfulness_score < SEMANTIC_FAITHFULNESS_THRESHOLD
+                    and bool(missed_edge_cases)
+                )
+                if semantic_failed:
+                    is_approved = False
+                    if error_type in {"NONE", "PART_ERROR"}:
+                        error_type = "LOGIC_ERROR"
                 requires_human_input = bool(data.get("requires_human_input", False))
                 recoverable = bool(data.get("recoverable", True))
                 if not recoverable:
                     requires_human_input = True
-                routing_target = data.get("routing_target") or _routing_target(error_type)
+                routing_target = "Builder" if (
+                    (
+                        metabolic_burden_score is not None
+                        and metabolic_burden_score < METABOLIC_BURDEN_THRESHOLD
+                    )
+                    or robustness_failed
+                    or cello_ucf_failed
+                    or semantic_failed
+                ) else data.get("routing_target") or _routing_target(error_type)
                 benchmark_summary = data.get("benchmark_summary", "")
                 
                 if node:

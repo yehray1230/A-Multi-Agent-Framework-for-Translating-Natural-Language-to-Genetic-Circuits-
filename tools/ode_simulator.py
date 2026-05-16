@@ -137,12 +137,14 @@ class BatchODESimulator:
         sample_count: int = 80,
         monte_carlo_samples: int = 1,
         noise_fraction: float = 0.15,
+        noise_level: float | None = None,
         cache_dir: str | None = None,
     ):
         self.simulation_time = simulation_time
         self.sample_count = sample_count
         self.monte_carlo_samples = max(1, int(monte_carlo_samples))
-        self.noise_fraction = max(0.0, float(noise_fraction))
+        selected_noise = noise_fraction if noise_level is None else noise_level
+        self.noise_fraction = max(0.0, float(selected_noise))
         self._memory = Memory(cache_dir, verbose=0) if cache_dir and Memory is not None else None
         self._local_cache: dict[tuple, dict[str, Any]] = {}
 
@@ -162,6 +164,7 @@ class BatchODESimulator:
         params = _flatten_parameters(biokinetic_parameters)
         parameter_provenance = _parameter_provenance(biokinetic_parameters)
         params["promoter_resource_demand"] = max(1.0, params["km_rnap"] * 0.35)
+        physical_assignment_metrics = _physical_assignment_metrics(topology)
 
         cache_key = _cache_key(
             topology,
@@ -185,9 +188,16 @@ class BatchODESimulator:
             updates = {
                 "ode_status": "failed",
                 "kinetic_score": 0.0,
+                "robustness_score": 0.0,
+                "signal_to_noise_ratio": 0.0,
+                "monte_carlo_runs": self.monte_carlo_samples,
                 "score": 0.0,
                 "benchmark_report": {
                     "score": 0.0,
+                    "robustness_score": 0.0,
+                    "signal_to_noise_ratio": 0.0,
+                    "monte_carlo_runs": self.monte_carlo_samples,
+                    **physical_assignment_metrics,
                     "details": [{"metric": "kinetic", "status": "ode_failed"}],
                 },
             }
@@ -199,6 +209,7 @@ class BatchODESimulator:
         if self.monte_carlo_samples > 1:
             metrics.update(self._monte_carlo_metrics(gene_count, params, t_eval))
         kinetic_score = _kinetic_score(metrics)
+        robustness_score = kinetic_score
         base_score = float(topology.get("score", 0.65 + index * 0.02))
         final_score = max(0.0, min(1.0, 0.35 * base_score + 0.65 * kinetic_score))
         resource_occupancy = {
@@ -210,6 +221,8 @@ class BatchODESimulator:
 
         details = [
             {"metric": "kinetic", "score": kinetic_score},
+            {"metric": "robustness", "score": robustness_score},
+            {"metric": "signal_to_noise_ratio", "value": metrics["signal_to_noise_ratio"]},
             {"metric": "max_burden", "value": metrics["max_burden_nM"], "unit": "nM"},
             {"metric": "output_cv", "value": metrics["output_cv"]},
             {"metric": "resource_occupancy", "value": resource_occupancy},
@@ -229,6 +242,9 @@ class BatchODESimulator:
             "ode_status": "simulated",
             "gene_count": gene_count,
             "kinetic_score": kinetic_score,
+            "robustness_score": robustness_score,
+            "signal_to_noise_ratio": metrics["signal_to_noise_ratio"],
+            "monte_carlo_runs": self.monte_carlo_samples,
             "score": final_score,
             "metrics_max_burden": metrics["max_burden_nM"],
             "metrics_cv": metrics["output_cv"],
@@ -239,6 +255,10 @@ class BatchODESimulator:
             "monte_carlo_noise_fraction": self.noise_fraction,
             "benchmark_report": {
                 "score": final_score,
+                "robustness_score": robustness_score,
+                "signal_to_noise_ratio": metrics["signal_to_noise_ratio"],
+                "monte_carlo_runs": self.monte_carlo_samples,
+                **physical_assignment_metrics,
                 "details": details,
             },
         }
@@ -262,6 +282,42 @@ class BatchODESimulator:
         initial_state = np.zeros(gene_count * 2)
         return simulation, self._integrate(simulation, initial_state, t_eval)
 
+    def simulate_noisy_response(
+        self,
+        topology: dict[str, Any],
+        noise_level: float | None = None,
+        rng: np.random.Generator | None = None,
+    ) -> dict[str, float | bool | str]:
+        gene_count = _infer_gene_count(topology)
+        params = _flatten_parameters(topology.get("biokinetic_parameters", {}))
+        params["promoter_resource_demand"] = max(1.0, params["km_rnap"] * 0.35)
+        sample_params = _perturb_biokinetic_parameters(
+            params,
+            self.noise_fraction if noise_level is None else max(0.0, float(noise_level)),
+            rng or np.random.default_rng(),
+        )
+        t_eval = np.linspace(0.0, self.simulation_time, self.sample_count)
+        simulation, result = self._run_single_simulation(gene_count, sample_params, t_eval)
+        if result is None or not result.success:
+            return {
+                "success": False,
+                "on_value": 0.0,
+                "off_value": float("inf"),
+                "error": getattr(result, "message", "ODE simulation failed."),
+            }
+        protein = np.maximum(result.y[result.y.shape[0] // 2 :, :], 0.0)
+        output = protein[-1, :] if protein.size else np.zeros(result.y.shape[1])
+        off_window = max(1, min(len(output), int(math.ceil(len(output) * 0.1))))
+        on_value = float(output[-1]) if len(output) else 0.0
+        off_value = float(np.max(output[:off_window])) if len(output) else 0.0
+        metrics = _simulation_metrics(result.y, simulation.resource_trace, sample_params)
+        return {
+            "success": True,
+            "on_value": on_value,
+            "off_value": off_value,
+            "signal_to_noise_ratio": metrics["signal_to_noise_ratio"],
+        }
+
     def _monte_carlo_metrics(
         self,
         gene_count: int,
@@ -279,13 +335,17 @@ class BatchODESimulator:
             "leak_fraction",
             "mrna_degradation_rate",
             "protein_degradation_rate",
+            "y_min",
+            "ymax",
+            "y_max",
         ]
         for _ in range(self.monte_carlo_samples):
-            sample_params = params.copy()
-            for key in perturbable:
-                if key in sample_params:
-                    factor = float(rng.normal(1.0, self.noise_fraction))
-                    sample_params[key] = max(1e-9, sample_params[key] * factor)
+            sample_params = _perturb_biokinetic_parameters(
+                params,
+                self.noise_fraction,
+                rng,
+                perturbable,
+            )
             simulation, result = self._run_single_simulation(gene_count, sample_params, t_eval)
             if result is None or not result.success:
                 failures += 1
@@ -369,6 +429,34 @@ def _parameter_provenance(raw: dict[str, Any]) -> dict[str, Any]:
     return {"source_summary": source_summary, "unit_system": "nM and seconds"}
 
 
+def _perturb_biokinetic_parameters(
+    params: dict[str, float],
+    noise_level: float,
+    rng: np.random.Generator,
+    perturbable: list[str] | None = None,
+) -> dict[str, float]:
+    sample_params = params.copy()
+    keys = perturbable or [
+        "transcription_rate",
+        "translation_rate",
+        "kd",
+        "hill_coefficient",
+        "leak_fraction",
+        "mrna_degradation_rate",
+        "protein_degradation_rate",
+        "y_min",
+        "ymax",
+        "y_max",
+    ]
+    for key in keys:
+        if key not in sample_params:
+            continue
+        original = float(sample_params[key])
+        sigma = abs(original) * max(0.0, float(noise_level))
+        sample_params[key] = max(0.0, float(rng.normal(original, sigma)))
+    return sample_params
+
+
 def _rk4_integrate(rhs, initial_state: np.ndarray, t_eval: np.ndarray) -> Any:
     y = np.zeros((len(initial_state), len(t_eval)))
     y[:, 0] = initial_state
@@ -411,6 +499,7 @@ def _simulation_metrics(y: np.ndarray, trace: list[dict[str, float]], params: di
     return {
         "max_burden_nM": max_burden,
         "output_cv": output_std / max(output_mean, 1e-9),
+        "signal_to_noise_ratio": output_mean / max(output_std, 1e-9),
         "dynamic_margin": dynamic_margin,
         "rnap_occupancy_max": float(max(rnap_occupancies)),
         "ribosome_occupancy_max": float(max(ribo_occupancies)),
@@ -453,6 +542,62 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return default if value is None else float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y"}:
+            return True
+        if lowered in {"0", "false", "no", "n"}:
+            return False
+        return default
+    return bool(value)
+
+
+def _physical_assignment_metrics(topology: dict[str, Any]) -> dict[str, float | bool]:
+    benchmark_report = topology.get("benchmark_report")
+    if not isinstance(benchmark_report, dict):
+        benchmark_report = {}
+    return {
+        "orthogonality_score": _coerce_float(
+            topology.get(
+                "orthogonality_score",
+                benchmark_report.get("orthogonality_score"),
+            ),
+            1.0,
+        ),
+        "cello_assignment_score": _coerce_float(
+            topology.get(
+                "cello_assignment_score",
+                benchmark_report.get("cello_assignment_score"),
+            ),
+            0.0,
+        ),
+        "cello_buildable": _coerce_bool(
+            topology.get("cello_buildable", benchmark_report.get("cello_buildable")),
+            False,
+        ),
+        "toxicity": _coerce_float(
+            topology.get("toxicity", benchmark_report.get("toxicity")),
+            0.0,
+        ),
+        "toxicity_score": _coerce_float(
+            topology.get("toxicity_score", benchmark_report.get("toxicity_score")),
+            1.0,
+        ),
+    }
+
+
 def _cache_key(
     topology: dict[str, Any],
     index: int,
@@ -468,6 +613,7 @@ def _cache_key(
         int(topology.get("gate_count", gene_count)),
         index,
         tuple(sorted((key, round(float(value), 9)) for key, value in params.items())),
+        tuple(sorted(_physical_assignment_metrics(topology).items())),
         round(float(simulation_time), 6),
         int(sample_count),
         int(monte_carlo_samples),

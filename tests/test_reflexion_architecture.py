@@ -17,7 +17,11 @@ sys.modules.setdefault("litellm.exceptions", litellm_exceptions_stub)
 sys.modules.setdefault("litellm.caching", litellm_caching_stub)
 
 from agents.builder_agent import call_builder
-from agents.critic_agent import CriticAgent
+from agents.critic_agent import (
+    CELLO_UCF_GUIDANCE,
+    SEMANTIC_FAITHFULNESS_GUIDANCE_TEMPLATE,
+    CriticAgent,
+)
 from schemas.state import DesignState, SearchNode
 from workflows.reflexion_controller import run_reflexion_workflow
 
@@ -60,6 +64,71 @@ def test_state_defaults_include_hitl_and_failed_memory() -> None:
     assert state.human_feedback_prompt is None
     assert state.pause_reason is None
     assert state.human_constraints == []
+    assert node.metabolic_burden_score == 1.0
+    assert node.gate_count == 0
+    assert node.complexity_penalty == 0.0
+    assert node.robustness_score == 1.0
+    assert node.signal_to_noise_ratio == 0.0
+    assert node.monte_carlo_runs == 0
+    assert node.temporal_score == 1.0
+    assert node.rise_time is None
+    assert node.orthogonality_score == 1.0
+    assert node.cello_assignment_score == 0.0
+    assert node.cello_buildable is False
+    assert node.semantic_faithfulness_score == 1.0
+    assert node.missed_edge_cases == []
+
+
+def test_search_node_syncs_evaluation_metrics_from_topology() -> None:
+    node = SearchNode(node_id="root")
+
+    node.sync_evaluation_metrics(
+        {
+            "score": "0.72",
+            "metabolic_burden_score": "0.88",
+            "gate_count": "3",
+            "complexity_penalty": "0.15",
+            "robustness_score": "0.91",
+            "snr": "12.5",
+            "monte_carlo_runs": "8",
+        }
+    )
+
+    assert node.score == 0.72
+    assert node.metabolic_burden_score == 0.88
+    assert node.gate_count == 3
+    assert node.complexity_penalty == 0.15
+    assert node.robustness_score == 0.91
+    assert node.signal_to_noise_ratio == 12.5
+    assert node.monte_carlo_runs == 8
+
+    node.sync_evaluation_metrics(
+        {
+            "benchmark_report": {
+                "metabolic_burden_score": "0.66",
+                "gate_count": "5",
+                "complexity_penalty": "0.34",
+                "robustness_score": "0.73",
+                "signal_to_noise_ratio": "9.25",
+                "monte_carlo_samples": "3",
+                "temporal_score": "0.77",
+                "rise_time": "140.0",
+                "semantic_faithfulness_score": "0.81",
+                "missed_conditions": ["missing low input case"],
+            }
+        }
+    )
+
+    assert node.metabolic_burden_score == 0.66
+    assert node.gate_count == 5
+    assert node.complexity_penalty == 0.34
+    assert node.robustness_score == 0.73
+    assert node.signal_to_noise_ratio == 9.25
+    assert node.monte_carlo_runs == 3
+    assert node.temporal_score == 0.77
+    assert node.rise_time == 140.0
+    assert node.semantic_faithfulness_score == 0.81
+    assert node.missed_edge_cases == ["missing low input case"]
 
 
 def test_builder_accepts_exactly_three_required_strategies(monkeypatch) -> None:
@@ -124,7 +193,7 @@ def test_critic_routes_low_functional_score_to_logic_error(monkeypatch) -> None:
     assert result.error_type == "LOGIC_ERROR"
 
 
-def test_critic_routes_mapping_failure_to_part_error(monkeypatch) -> None:
+def test_critic_routes_mapping_failure_to_builder_when_cello_is_not_buildable(monkeypatch) -> None:
     response = {
         "reasoning": "Logic is plausible but mapping failed.",
         "score": 0.55,
@@ -148,8 +217,254 @@ def test_critic_routes_mapping_failure_to_part_error(monkeypatch) -> None:
 
     result = CriticAgent(api_key=None, model_name="mock").run(state)
 
-    assert result.tree_nodes["root"].error_type == "PART_ERROR"
-    assert result.error_type == "PART_ERROR"
+    assert result.tree_nodes["root"].error_type == "LOGIC_ERROR"
+    assert result.error_type == "LOGIC_ERROR"
+    assert CELLO_UCF_GUIDANCE in result.tree_nodes["root"].critic_feedbacks[-1]
+
+
+def test_critic_forces_builder_feedback_for_low_metabolic_burden(monkeypatch) -> None:
+    response = {
+        "reasoning": "Looks functionally correct.",
+        "score": 0.82,
+        "benchmark_summary": "weighted score is acceptable but burden is high",
+        "is_approved": True,
+        "error_type": "NONE",
+        "routing_target": "Consolidator",
+        "recoverable": True,
+        "requires_human_input": False,
+        "feedback": "Simplify the implementation.",
+    }
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured["system_prompt"] = kwargs["system_prompt"]
+        captured["user_content"] = kwargs["user_content"]
+        return json.dumps(response)
+
+    monkeypatch.setattr("agents.critic_agent.call_llm", fake_call_llm)
+
+    state = DesignState(user_intent="A and not B")
+    state.current_node_id = "root"
+    state.tree_nodes["root"] = SearchNode(
+        node_id="root",
+        logic_proposals=["Y = A AND NOT B"],
+        best_topology={
+            "score": 0.82,
+            "metabolic_burden_score": 0.55,
+            "gate_count": 8,
+            "complexity_penalty": 0.45,
+            "benchmark_report": {
+                "score": 0.82,
+                "metabolic_burden_score": 0.55,
+                "details": [{"metric": "metabolic_burden", "score": 0.55}],
+            },
+        },
+    )
+
+    result = CriticAgent(api_key=None, model_name="mock").run(state)
+
+    feedback = result.tree_nodes["root"].critic_feedbacks[-1]
+    assert result.tree_nodes["root"].is_approved is False
+    assert result.tree_nodes["root"].error_type == "LOGIC_ERROR"
+    assert "metabolic_burden_score" in captured["system_prompt"]
+    assert "metabolic_burden_score" in captured["user_content"]
+    assert (
+        "當前基因電路設計過於複雜，會對宿主細胞造成過高的代謝負擔，"
+        "請嘗試使用卡諾圖化簡或合併邏輯閘來精簡 Verilog 代碼"
+    ) in feedback
+
+
+def test_critic_forces_builder_feedback_for_low_robustness(monkeypatch) -> None:
+    response = {
+        "reasoning": "Functionally correct but dynamics are fragile.",
+        "score": 0.83,
+        "benchmark_summary": "robustness is low",
+        "is_approved": True,
+        "error_type": "NONE",
+        "routing_target": "Consolidator",
+        "recoverable": True,
+        "requires_human_input": False,
+        "feedback": "Increase dynamic margin.",
+    }
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured["system_prompt"] = kwargs["system_prompt"]
+        captured["user_content"] = kwargs["user_content"]
+        return json.dumps(response)
+
+    monkeypatch.setattr("agents.critic_agent.call_llm", fake_call_llm)
+
+    state = DesignState(user_intent="A and not B")
+    state.current_node_id = "root"
+    state.tree_nodes["root"] = SearchNode(
+        node_id="root",
+        logic_proposals=["Y = A AND NOT B"],
+        best_topology={
+            "score": 0.83,
+            "robustness_score": 0.62,
+            "signal_to_noise_ratio": 1.4,
+            "benchmark_report": {
+                "score": 0.83,
+                "robustness_score": 0.62,
+                "details": [
+                    {
+                        "metric": "kinetic",
+                        "score": 0.62,
+                        "robustness_score": 0.62,
+                        "collapsed": False,
+                    }
+                ],
+            },
+        },
+    )
+
+    result = CriticAgent(api_key=None, model_name="mock").run(state)
+
+    feedback = result.tree_nodes["root"].critic_feedbacks[-1]
+    assert result.tree_nodes["root"].is_approved is False
+    assert result.tree_nodes["root"].error_type == "LOGIC_ERROR"
+    assert "robustness_score" in captured["system_prompt"]
+    assert "robustness_score" in captured["user_content"]
+    assert (
+        "動態強健性測試失敗：當前電路在生化參數發生高斯擾動時，ON/OFF 狀態的訊號邊界會模糊甚至重疊。"
+        "請考慮：(1) 更換具有更陡峭 Hill Function（非線性更強）的邏輯閘元件，"
+        "(2) 確保上游推動下游的訊號餘裕（Margin）足夠大，避免級聯訊號衰減。"
+    ) in feedback
+
+
+def test_critic_forces_builder_feedback_for_signal_overlap(monkeypatch) -> None:
+    response = {
+        "reasoning": "Aggregate score is high but ON/OFF overlap occurred.",
+        "score": 0.84,
+        "benchmark_summary": "collapsed noisy trial",
+        "is_approved": True,
+        "error_type": "NONE",
+        "routing_target": "Consolidator",
+        "recoverable": True,
+        "requires_human_input": False,
+        "feedback": "Review dynamic behavior.",
+    }
+    monkeypatch.setattr("agents.critic_agent.call_llm", lambda **_: json.dumps(response))
+
+    state = DesignState(user_intent="A and not B")
+    state.current_node_id = "root"
+    state.tree_nodes["root"] = SearchNode(
+        node_id="root",
+        logic_proposals=["Y = A AND NOT B"],
+        best_topology={
+            "score": 0.84,
+            "robustness_score": 0.9,
+            "benchmark_report": {
+                "score": 0.84,
+                "robustness_score": 0.9,
+                "details": [
+                    {
+                        "metric": "kinetic",
+                        "collapsed": True,
+                        "min_signal": 12.0,
+                        "max_noise": 13.0,
+                    }
+                ],
+            },
+        },
+    )
+
+    result = CriticAgent(api_key=None, model_name="mock").run(state)
+
+    assert result.tree_nodes["root"].is_approved is False
+    assert result.tree_nodes["root"].error_type == "LOGIC_ERROR"
+    assert "動態強健性測試失敗" in result.tree_nodes["root"].critic_feedbacks[-1]
+
+
+def test_critic_forces_builder_feedback_for_cello_ucf_violation(monkeypatch) -> None:
+    response = {
+        "reasoning": "Cello assignment is not buildable.",
+        "score": 0.86,
+        "benchmark_summary": "UCF mapping failed",
+        "is_approved": True,
+        "error_type": "NONE",
+        "routing_target": "Consolidator",
+        "recoverable": True,
+        "requires_human_input": False,
+        "feedback": "Try a different mapping.",
+    }
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured["system_prompt"] = kwargs["system_prompt"]
+        captured["user_content"] = kwargs["user_content"]
+        return json.dumps(response)
+
+    monkeypatch.setattr("agents.critic_agent.call_llm", fake_call_llm)
+
+    state = DesignState(user_intent="A and not B")
+    state.current_node_id = "root"
+    state.tree_nodes["root"] = SearchNode(
+        node_id="root",
+        logic_proposals=["Y = A AND NOT B"],
+        best_topology={
+            "score": 0.86,
+            "mapping_status": "MAPPING_FAILED",
+            "benchmark_report": {
+                "score": 0.86,
+                "orthogonality_score": 0.05,
+                "cello_assignment_score": 0.0,
+                "cello_buildable": False,
+            },
+        },
+    )
+
+    result = CriticAgent(api_key=None, model_name="mock").run(state)
+
+    feedback = result.tree_nodes["root"].critic_feedbacks[-1]
+    assert result.tree_nodes["root"].is_approved is False
+    assert result.tree_nodes["root"].error_type == "LOGIC_ERROR"
+    assert "orthogonality_score" in captured["system_prompt"]
+    assert "cello_buildable" in captured["user_content"]
+    assert CELLO_UCF_GUIDANCE in feedback
+
+
+def test_critic_forces_precise_feedback_for_low_semantic_faithfulness(monkeypatch) -> None:
+    response = {
+        "reasoning": "Physical implementation may work but misses part of the prompt.",
+        "score": 0.91,
+        "benchmark_summary": "semantic coverage is incomplete",
+        "is_approved": True,
+        "error_type": "NONE",
+        "routing_target": "Consolidator",
+        "recoverable": True,
+        "requires_human_input": False,
+        "feedback": "Looks buildable.",
+    }
+    monkeypatch.setattr("agents.critic_agent.call_llm", lambda **_: json.dumps(response))
+    missed_edge_cases = ["A=0,B=1 must force Y=0", "invalid input should fail closed"]
+
+    state = DesignState(user_intent="A and not B, fail closed on invalid input")
+    state.current_node_id = "root"
+    state.tree_nodes["root"] = SearchNode(
+        node_id="root",
+        logic_proposals=["Y = A AND NOT B"],
+        best_topology={
+            "score": 0.91,
+            "benchmark_report": {
+                "score": 0.91,
+                "semantic_faithfulness_score": 0.84,
+                "missed_edge_cases": missed_edge_cases,
+            },
+        },
+    )
+
+    result = CriticAgent(api_key=None, model_name="mock").run(state)
+
+    expected_guidance = SEMANTIC_FAITHFULNESS_GUIDANCE_TEMPLATE.format(
+        missed_edge_cases="；".join(missed_edge_cases)
+    )
+    feedback = result.tree_nodes["root"].critic_feedbacks[-1]
+    assert result.tree_nodes["root"].is_approved is False
+    assert result.tree_nodes["root"].error_type == "LOGIC_ERROR"
+    assert result.error_type == "LOGIC_ERROR"
+    assert expected_guidance in feedback
 
 
 class _NoopAgent:
