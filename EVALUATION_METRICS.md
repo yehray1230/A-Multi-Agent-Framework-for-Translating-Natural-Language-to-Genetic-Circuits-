@@ -1,77 +1,330 @@
-# 基因電路科學驗證與評分系統 (Evaluation Metrics & Validation Framework)
+# 評估指標與驗證框架
 
-本文件旨在闡述自動化基因電路設計代理 (Agentic Genetic Circuit Designer) 內部的科學評估與評分機制。本系統結合了非線性常微分方程 (Ordinary Differential Equations, ODEs) 以及多維度懲罰模型，確保 AI 產出的設計不僅在「布林邏輯」上正確，更能承受宿主細胞內真實的生化擾動。
+本專案的評估邏輯集中在 [benchmark_suite](benchmark_suite) 與 [tools/ode_simulator.py](tools/ode_simulator.py)。工作流會先讓 Cello/ODE topology 帶有初步 metrics，再由 [benchmark_suite/benchmark_controller.py](benchmark_suite/benchmark_controller.py) 的 `evaluate_candidate()` 產生統一的 weighted total score。
 
----
+## 1. 評估總覽
 
-## 1. 驗證系統理念 (Validation Philosophy)
+`evaluate_candidate(candidate)` 會呼叫下列 scorer：
 
-在合成生物學中，純邏輯層面的正確性（如 Verilog 組合邏輯）往往不足以保證活體細胞內的運作可行性。這是因為生物系統本質上是「類比信號 (Analog)」且充滿雜訊的。
-啟動子可能發生「漏電 (Leakage)」，過度表現外源蛋白會產生「代謝毒性 (Metabolic Burden)」，而細胞內的資源競爭亦會導致訊號失真。因此，我們引入了嚴謹的動力學模擬與多維度評分矩陣，作為系統中 **Critic Agent** 決定是否退回重做的客觀依據。
+- [benchmark_suite/functional_scorer.py](benchmark_suite/functional_scorer.py)：功能正確性。
+- [benchmark_suite/kinetic_scorer.py](benchmark_suite/kinetic_scorer.py)：動力學與 Monte Carlo robustness。
+- [benchmark_suite/static_plausibility_evaluator.py](benchmark_suite/static_plausibility_evaluator.py)：靜態可行性。
+- [benchmark_suite/metabolic_scorer.py](benchmark_suite/metabolic_scorer.py)：gate count 與 metabolic burden。
+- [benchmark_suite/temporal_scorer.py](benchmark_suite/temporal_scorer.py)：response/rise time。
+- [benchmark_suite/cello_constraint_evaluator.py](benchmark_suite/cello_constraint_evaluator.py)：Cello assignment、orthogonality、toxicity、buildability。
 
----
+`evaluate_candidate()` 會回傳：
 
-## 2. 動力學模擬引擎 (ODE Simulation Engine)
+- `score`
+- `weighted_total_score`
+- `grade`
+- `component_scores`
+- `score_weights`
+- `details`
+- 各類常用指標，如 `metabolic_burden_score`、`robustness_score`、`orthogonality_score`、`cello_assignment_score`。
 
-系統內建的動力學模擬引擎 (`tools/ode_simulator.py`) 優先使用 Python 的 `scipy.integrate.solve_ivp`，依序嘗試 BDF 與 Radau 演算法以處理剛性方程式；若 SciPy 不可用或積分失敗，會退回內建 RK4 fallback。
+## 2. Weighted Total Score
 
-### 2.1 核心生化機制建模
-對於基因網路上每個節點的目標物質，我們建立一組耦合常微分方程，分別模擬其 mRNA 與蛋白質的動態：
-*   **轉錄 (Transcription):** 以 Hill Function 模擬多重抑制劑 (Repressors) 與活化劑 (Activators) 的啟動子競爭佔用。結合漏電係數 (Leakage) 決定有效轉錄速率 (Effective Transcription Rate)。
-*   **轉譯 (Translation):** 考慮 mRNA 濃度與核糖體結合效率 (RBS strength)。
-*   **降解 (Degradation):** 模擬 mRNA 與蛋白質的自然降解半衰期。
-*   **誘導劑交互作用 (Inducer Binding):** 利用獨立的 Hill Function 模擬外部環境訊號 (如 IPTG, aTc) 與感測器蛋白結合後導致的去活化 (Deactivation) 效應。
+權重定義在 [benchmark_suite/benchmark_controller.py](benchmark_suite/benchmark_controller.py) 的 `SCORE_WEIGHTS`：
 
-### 2.2 蒙地卡羅壓力測試 (Monte Carlo Testing)
-單一決定性 (Deterministic) 的模擬不足以反映生物雜訊。`BatchODESimulator` 因此提供可設定的 Monte Carlo 壓力測試：當 `monte_carlo_samples > 1` 時，系統會針對轉錄率、轉譯率、結合常數 $K_d$、Hill coefficient、漏電係數與降解率引入高斯分佈噪音，預設噪音比例為 15%。Monte Carlo 會輸出 `monte_carlo_terminal_output_cv` 與 `monte_carlo_failure_rate`，並納入 kinetic score 懲罰。
+| Component | Weight |
+| --- | ---: |
+| `functional` | 0.22 |
+| `kinetic` | 0.15 |
+| `static_plausibility` | 0.08 |
+| `metabolic_burden` | 0.15 |
+| `robustness` | 0.15 |
+| `temporal` | 0.05 |
+| `orthogonality` | 0.10 |
+| `cello_assignment` | 0.10 |
 
----
+公式：
 
-## 3. 評分指標矩陣 (Scoring Metrics)
+```text
+weighted_total_score =
+  0.22 * functional
++ 0.15 * kinetic
++ 0.08 * static_plausibility
++ 0.15 * metabolic_burden
++ 0.15 * robustness
++ 0.05 * temporal
++ 0.10 * orthogonality
++ 0.10 * cello_assignment
+```
 
-為了將高維度的模擬曲線壓縮為決策演算法可判讀的量化指標，我們在 `benchmark_suite/` 目錄下實作了三個核心評估模組。
+所有 component score 都會經 `_clamp_score()` 限制在 0 到 1。
 
-### 3.1 功能正確性評分 (Functional Scorer)
-對應模組：`functional_scorer.py`
-專注於理想（無雜訊）條件下的邏輯辨識度。
-*   **Fold Change (FC) Score**: 
-    提取目標產物在所有 ON 狀態中的最小濃度 (`Min ON`)，除以在所有 OFF 狀態中的最大濃度 (`Max OFF`)。
-    $Fold Change = \frac{Min\_ON}{Max\_OFF}$
-    並透過自訂的 Hill Equation 映射為 0~100 分。
-*   **邏輯吻合度 (Logic Compliance)**: 
-    使用 Sigmoid 函數設立嚴格閾值 (`thresh_on`, `thresh_off`)，只要有任何一個狀態未跨越安全閾值，分數將遭遇指數級乘數懲罰。
-*   **漏電與裕度 (Margin Score)**: 
-    利用 $e^{-k \times Max\_OFF}$ 評估 OFF 狀態的乾淨度，強烈懲罰背景漏電現象。
+等級定義：
 
-### 3.2 動力學與物理限制評分 (Kinetic Scorer)
-對應模組：`kinetic_scorer.py`
-專注於分析蒙地卡羅壓力測試的多組數據，確保物理層面可被實現。
-*   **穩健度保留係數 ($R_{Kinetic}$)**:
-    衡量引入雜訊後的 Fold Change 衰減程度，並計算變異係數 (Coefficient of Variation, $CV = \sigma / \mu$)。高 CV 值將觸發指數遞減懲罰，保障系統的抗噪能力。
-*   **代謝毒性評估 ($P_{Burden}$)**:
-    追蹤模擬過程中「所有非目標蛋白質（如邏輯閘中間產物）」的濃度總和。當其最大值 (`max_burden`) 逼近細胞的軟限制 (`limit_soft`，例如 45,000 nM) 時，觸發 Sigmoid 函數式崩潰：
-    $P_{Burden} = \frac{1}{1 + e^{k_{burden} (max\_burden - limit\_soft)}}$
-    此分數過低往往代表元件疊加過度，是觸發 Critic Agent 將問題歸類為 `PART_ERROR` 的重要指標。
-*   **時序效率 ($Score_{Temporal}$)**:
-    計算訊號從輸入層傳遞到輸出層，跨越啟動閾值所需的「平均上升時間 (Rise Time)」。層級過深會導致巨大的時間延遲並被扣分。
+- `Excellent`：score >= 0.80
+- `Pass`：0.60 <= score < 0.80
+- `Fail`：score < 0.60
 
-### 3.3 靜態合理性評估 (Static Plausibility)
-對應模組：`static_plausibility_evaluator.py`
-*   執行拓樸學層面的分析。當演算法發現選用了重複的元件序列時，將施加同源重組 (Homologous Recombination) 懲罰。
-*   同時針對過高的電路層級深度的網路進行預先折扣。
+## 3. Functional Scorer
 
----
+實作位置：[benchmark_suite/functional_scorer.py](benchmark_suite/functional_scorer.py)
 
-## 4. Benchmark Controller 的匯總機制
+功能評估會嘗試從 candidate 讀取：
 
-所有模組最終在 `benchmark_controller.py` 進行統一收斂與加權。
+- `truth_table`
+- `truth_table_or_logic_matrix`
+- `verilog`
+- `min_on`
+- `max_off`
+- `fold_change`
 
-**最終實驗潛力分數 (Total Viability Score)** 在 `benchmark_suite/benchmark_controller.py` 採用**連乘懲罰機制**：
-$$Total\_Score = Score_{Functional} \times C_{Plausibility} \times R_{Kinetic} \times P_{Burden} \times Score_{Temporal}$$
+主要評估面向：
 
-連乘機制的科學用意在於「木桶理論」：只要任何一項指標（如毒性過高導致 $P_{Burden} \to 0$，或漏電導致 $Score_{Functional} \to 0$）崩潰，總分將直接歸零，防止 AI 通過彌補其他指標來蒙混過關。
+- Verilog 是否能用簡化的 combinational parser 模擬。
+- truth table row 的 expected output 是否與 Verilog 輸出一致。
+- ON/OFF fold change 與 margin 是否足夠。
 
-最終會將分數分為三級：
-*   **Excellent (≥80)**: 准予輸出（PASS）。
-*   **Pass (60~79)**: 勉強及格，通常伴隨潛在的漏電或毒性警告。
-*   **Fail (<60)**: 直接退回。此時產生的詳細扣分報表（包含具體的 `metrics_cv`, `metrics_max_burden`、Monte Carlo failure rate 等）將回傳給 **Critic Agent** 作為除錯依據，以判斷應走 `LOGIC_ERROR`、`PART_ERROR` 或 `BOTH` 的修復路徑。
+支援的 Verilog 內容偏向簡單 combinational gates：
+
+- `assign`
+- `and`
+- `or`
+- `not`
+- `nand`
+- `nor`
+- `xor`
+- `xnor`
+- `buf`
+
+## 4. Kinetic Scorer
+
+實作位置：[benchmark_suite/kinetic_scorer.py](benchmark_suite/kinetic_scorer.py)
+
+Kinetic scorer 會優先使用 candidate 既有的模擬結果，例如：
+
+- `kinetic_score`
+- `robustness_score`
+- `signal_to_noise_ratio` 或 `snr`
+- `monte_carlo_runs` 或 `monte_carlo_samples`
+- `monte_carlo_failure_rate`
+- `monte_carlo_terminal_output_cv`
+- `metrics_cv`
+- `dynamic_margin`
+
+若 candidate 有足夠 simulation inputs，也可執行 noisy response 評估。SNR 轉分數使用 `_snr_to_score()`。
+
+## 5. ODE Simulation Engine
+
+實作位置：[tools/ode_simulator.py](tools/ode_simulator.py)
+
+`BatchODESimulator` 會對每個 topology 執行資源感知 ODE 模擬。重要類別：
+
+- `WarmStartResourceSolver`：估算 free RNAP/ribosome，並回傳 occupancy。
+- `ResourceAwareSimulation`：建立 mRNA/protein dynamics RHS。
+- `BatchODESimulator`：批次模擬 topology、Monte Carlo perturbation、cache。
+
+### 5.1 動力學模型
+
+狀態向量包含每個 gene 的 mRNA 與 protein：
+
+```text
+y = [mRNA_1 ... mRNA_n, protein_1 ... protein_n]
+```
+
+RHS 會考慮：
+
+- transcription rate
+- translation rate
+- mRNA degradation
+- protein degradation
+- RNAP resource occupancy
+- ribosome resource occupancy
+- Hill repression
+- leak fraction
+
+### 5.2 Solver
+
+模擬器優先使用 SciPy：
+
+1. `solve_ivp(..., method="BDF")`
+2. `solve_ivp(..., method="Radau")`
+
+若 SciPy 不存在或 solver 失敗，會使用內建 `_rk4_integrate()` 作為 fallback。
+
+### 5.3 Monte Carlo
+
+`BatchODESimulator` 支援：
+
+- `monte_carlo_samples`
+- `noise_fraction`
+- `noise_level`
+
+會 perturb：
+
+- `transcription_rate`
+- `translation_rate`
+- `kd`
+- `hill_coefficient`
+- `leak_fraction`
+- `mrna_degradation_rate`
+- `protein_degradation_rate`
+- `y_min`
+- `ymax`
+- `y_max`
+
+輸出會包含：
+
+- `monte_carlo_runs`
+- `monte_carlo_failure_rate`
+- `monte_carlo_terminal_output_cv`
+
+### 5.4 ODE 輸出欄位
+
+成功模擬時 topology 會被補上：
+
+- `ode_status = "simulated"`
+- `gene_count`
+- `kinetic_score`
+- `robustness_score`
+- `signal_to_noise_ratio`
+- `metrics_max_burden`
+- `metrics_cv`
+- `dynamic_margin`
+- `resource_occupancy`
+- `parameter_provenance`
+- `benchmark_report`
+
+失敗時：
+
+- `ode_status = "failed"`
+- `kinetic_score = 0.0`
+- `robustness_score = 0.0`
+- `score = 0.0`
+- `benchmark_report.details` 會包含 `{"metric": "kinetic", "status": "ode_failed"}`
+
+## 6. Metabolic Burden Scorer
+
+實作位置：[benchmark_suite/metabolic_scorer.py](benchmark_suite/metabolic_scorer.py)
+
+此 scorer 會從 Verilog 計算 logic gates 數量。支援 primitive gates：
+
+- `and`
+- `nand`
+- `or`
+- `nor`
+- `xor`
+- `xnor`
+- `not`
+- `buf`
+
+分數函式：
+
+```text
+metabolic_burden_score = exp(-decay_rate * max(0, gate_count - free_gate_count))
+```
+
+目前預設：
+
+- `free_gate_count = 3`
+- `decay_rate = 0.35`
+
+回傳欄位包括：
+
+- `metabolic_burden_score`
+- `gate_count`
+- `complexity_penalty`
+
+## 7. Temporal Scorer
+
+實作位置：[benchmark_suite/temporal_scorer.py](benchmark_suite/temporal_scorer.py)
+
+Temporal scorer 會計算或估算 rise time，並轉成 `temporal_score`。資料來源可能是：
+
+- candidate 既有的 `rise_time`
+- simulation trace 中的 `time` / `output`
+- `logic_depth`
+- `gate_count`
+
+若可從 trace 找到 crossing threshold，會使用 trace；否則用 gate depth/數量估算。
+
+## 8. Static Plausibility Evaluator
+
+實作位置：[benchmark_suite/static_plausibility_evaluator.py](benchmark_suite/static_plausibility_evaluator.py)
+
+此 evaluator 不跑 ODE，而是用 topology/Verilog 的靜態特徵估算可行性。它會檢查：
+
+- part repetition
+- logic depth
+- 是否有過度複雜或可能降低可建構性的結構
+
+輸出 component metric 為 `static_plausibility`。
+
+## 9. Cello Constraint Evaluator
+
+實作位置：[benchmark_suite/cello_constraint_evaluator.py](benchmark_suite/cello_constraint_evaluator.py)
+
+此 evaluator 從 Cello mapping report、stdout/stderr、raw error log 或 topology 欄位提取：
+
+- `orthogonality_score`
+- `cello_assignment_score`
+- `cello_buildable`
+- `toxicity`
+- `toxicity_score`
+
+常見嚴重錯誤包含：
+
+- not enough gates
+- not enough orthogonal parts/repressors
+- crosstalk / cross talk
+- Cello mapping failure
+
+`CelloWrapper` 也會呼叫 `evaluate_cello_constraints()`，把 constraint report 直接放進 topology。
+
+## 10. Semantic Faithfulness
+
+實作位置：[benchmark_suite/semantic_evaluator.py](benchmark_suite/semantic_evaluator.py)
+
+`SemanticFaithfulnessEvaluator` 可用 LLM 檢查 Verilog 是否忠實滿足使用者需求，回傳：
+
+- `semantic_faithfulness_score`
+- `missed_edge_cases`
+
+注意：目前 [benchmark_suite/benchmark_controller.py](benchmark_suite/benchmark_controller.py) 沒有直接呼叫 `score_semantic_faithfulness()`。`evaluate_candidate()` 會從 candidate 既有欄位讀取 `semantic_faithfulness_score` 與 `missed_edge_cases`，再放入總 report。若要讓 semantic evaluator 自動加入總分，需要在 controller 中新增 scorer 並調整權重。
+
+## 11. Critic 門檻與路由
+
+實作位置：[agents/critic_agent.py](agents/critic_agent.py)
+
+Critic 使用 benchmark report 做 approve/reject 決策。重要 threshold：
+
+| 常數 | 值 | 含義 |
+| --- | ---: | --- |
+| `PASS_SCORE_THRESHOLD` | 0.80 | 分數達此值才可能通過。 |
+| `FAIL_SCORE_THRESHOLD` | 0.60 | 低於此值必須失敗。 |
+| `METABOLIC_BURDEN_THRESHOLD` | 0.70 | 低於此值會強制不通過並路由到 Builder。 |
+| `ROBUSTNESS_THRESHOLD` | 0.75 | 低於此值或出現 signal overlap 會強制不通過。 |
+| `ORTHOGONALITY_THRESHOLD` | 0.20 | 低於或等於此值視為 Cello/UCF 嚴重問題。 |
+| `SEMANTIC_FAITHFULNESS_THRESHOLD` | 0.90 | 低於此值且有 missed edge cases 時強制不通過。 |
+
+路由原則：
+
+- truth table、Boolean expression、需求語意、gate count、robustness、Cello buildability 類問題通常歸為 `LOGIC_ERROR`。
+- 邏輯可接受但 mapping、part constraint、toxicity、ODE dynamics 不佳時歸為 `PART_ERROR`。
+- 兩者皆有問題時歸為 `BOTH`。
+- 都可接受時為 `NONE` 並 `is_approved=true`。
+
+## 12. 指標同步到 SearchNode
+
+[schemas/state.py](schemas/state.py) 的 `SearchNode.sync_evaluation_metrics()` 會把 topology 或 benchmark report 中的欄位同步到節點上，包含：
+
+- `score`
+- `metabolic_burden_score`
+- `gate_count`
+- `complexity_penalty`
+- `robustness_score`
+- `signal_to_noise_ratio`
+- `monte_carlo_runs`
+- `temporal_score`
+- `rise_time`
+- `orthogonality_score`
+- `cello_assignment_score`
+- `cello_buildable`
+- `semantic_faithfulness_score`
+- `missed_edge_cases`
+
+此同步讓 UI、Critic feedback、failed attempt record 與 skill extraction 都能使用同一組欄位。
