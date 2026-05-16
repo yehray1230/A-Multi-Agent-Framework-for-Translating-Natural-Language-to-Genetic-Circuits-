@@ -642,6 +642,7 @@ def _run_demo_iteration(state: DesignState) -> None:
     best_topology = max(node.candidate_topologies, key=lambda item: float(item.get("score", -9999)), default=None)
     node.best_topology = best_topology
     node.score = float(best_topology.get("score", -9999)) if best_topology else -float("inf")
+    node.sync_evaluation_metrics(best_topology)
     state.best_topology = best_topology
 
     _demo_critic_and_branch(state, node, options["enable_tree_search"])

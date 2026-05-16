@@ -8,6 +8,45 @@ NodeStatus = Literal["Pending", "Evaluated", "Pass", "Dead_End", "Needs_Human_In
 ErrorType = Literal["LOGIC_ERROR", "PART_ERROR", "BOTH", "NONE"]
 
 
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return default if value is None else float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return default if value is None else int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y"}:
+            return True
+        if lowered in {"0", "false", "no", "n"}:
+            return False
+        return default
+    return bool(value)
+
+
+def _coerce_str_list(value: Any, default: list[str]) -> list[str]:
+    if value is None:
+        return default
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, tuple):
+        return [str(item) for item in value]
+    return default
+
+
 @dataclass
 class SearchNode:
     node_id: str
@@ -22,12 +61,137 @@ class SearchNode:
     current_topology: str = ""
     best_topology: dict[str, Any] | None = None
     score: float = -float("inf")
+    metabolic_burden_score: float = 1.0
+    gate_count: int = 0
+    complexity_penalty: float = 0.0
+    robustness_score: float = 1.0
+    signal_to_noise_ratio: float = 0.0
+    monte_carlo_runs: int = 0
+    temporal_score: float = 1.0
+    rise_time: float | None = None
+    orthogonality_score: float = 1.0
+    cello_assignment_score: float = 0.0
+    cello_buildable: bool = False
+    semantic_faithfulness_score: float = 1.0
+    missed_edge_cases: list[str] = field(default_factory=list)
 
     critic_feedbacks: list[str] = field(default_factory=list)
     failed_attempts: list[dict[str, Any]] = field(default_factory=list)
     is_approved: bool = False
     error_type: ErrorType = "NONE"
     last_error: str | None = None
+
+    def sync_evaluation_metrics(self, topology: dict[str, Any] | None) -> None:
+        if not topology:
+            return
+        benchmark_report = topology.get("benchmark_report")
+        if not isinstance(benchmark_report, dict):
+            benchmark_report = {}
+        self.score = _coerce_float(
+            topology.get("score", benchmark_report.get("score")),
+            self.score,
+        )
+        self.metabolic_burden_score = _coerce_float(
+            topology.get(
+                "metabolic_burden_score",
+                benchmark_report.get("metabolic_burden_score"),
+            ),
+            self.metabolic_burden_score,
+        )
+        self.gate_count = _coerce_int(
+            topology.get("gate_count", benchmark_report.get("gate_count")),
+            self.gate_count,
+        )
+        self.complexity_penalty = _coerce_float(
+            topology.get(
+                "complexity_penalty",
+                benchmark_report.get("complexity_penalty"),
+            ),
+            self.complexity_penalty,
+        )
+        self.robustness_score = _coerce_float(
+            topology.get(
+                "robustness_score",
+                benchmark_report.get("robustness_score"),
+            ),
+            self.robustness_score,
+        )
+        self.signal_to_noise_ratio = _coerce_float(
+            topology.get(
+                "signal_to_noise_ratio",
+                topology.get(
+                    "snr",
+                    benchmark_report.get(
+                        "signal_to_noise_ratio",
+                        benchmark_report.get("snr"),
+                    ),
+                ),
+            ),
+            self.signal_to_noise_ratio,
+        )
+        self.monte_carlo_runs = _coerce_int(
+            topology.get(
+                "monte_carlo_runs",
+                topology.get(
+                    "monte_carlo_samples",
+                    benchmark_report.get(
+                        "monte_carlo_runs",
+                        benchmark_report.get("monte_carlo_samples"),
+                    ),
+                ),
+            ),
+            self.monte_carlo_runs,
+        )
+        self.temporal_score = _coerce_float(
+            topology.get(
+                "temporal_score",
+                benchmark_report.get("temporal_score"),
+            ),
+            self.temporal_score,
+        )
+        rise_time = topology.get("rise_time", benchmark_report.get("rise_time"))
+        self.rise_time = None if rise_time is None else _coerce_float(rise_time, self.rise_time or 0.0)
+        self.orthogonality_score = _coerce_float(
+            topology.get(
+                "orthogonality_score",
+                benchmark_report.get("orthogonality_score"),
+            ),
+            self.orthogonality_score,
+        )
+        self.cello_assignment_score = _coerce_float(
+            topology.get(
+                "cello_assignment_score",
+                benchmark_report.get("cello_assignment_score"),
+            ),
+            self.cello_assignment_score,
+        )
+        self.cello_buildable = _coerce_bool(
+            topology.get(
+                "cello_buildable",
+                benchmark_report.get("cello_buildable"),
+            ),
+            self.cello_buildable,
+        )
+        self.semantic_faithfulness_score = _coerce_float(
+            topology.get(
+                "semantic_faithfulness_score",
+                benchmark_report.get("semantic_faithfulness_score"),
+            ),
+            self.semantic_faithfulness_score,
+        )
+        self.missed_edge_cases = _coerce_str_list(
+            topology.get(
+                "missed_edge_cases",
+                topology.get(
+                    "missed_conditions",
+                    benchmark_report.get(
+                        "missed_edge_cases",
+                        benchmark_report.get("missed_conditions"),
+                    ),
+                ),
+            ),
+            self.missed_edge_cases,
+        )
 
 
 @dataclass

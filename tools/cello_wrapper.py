@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from benchmark_suite.cello_constraint_evaluator import evaluate_cello_constraints
 from schemas.state import DesignState
 
 
@@ -50,6 +51,9 @@ class CelloWrapper:
             "verilog": code,
             "score": 0.0,
             "mapping_status": "unmapped",
+            "orthogonality_score": 1.0,
+            "cello_assignment_score": 0.0,
+            "cello_buildable": False,
         }
 
     def _run_external_cello(self, index: int, code: str) -> dict[str, Any]:
@@ -98,14 +102,19 @@ class CelloWrapper:
                     return_code=completed.returncode,
                 )
 
-            return {
+            topology = {
                 "source": "external_cello_wrapper",
                 "verilog_index": index,
                 "verilog": code,
                 "score": 0.0,
                 "mapping_status": "mapped",
+                "orthogonality_score": 1.0,
+                "cello_assignment_score": 0.0,
+                "cello_buildable": True,
                 "cello_stdout": _truncate_error_log(completed.stdout or "", self.max_log_chars),
             }
+            topology.update(_topology_cello_metrics(topology))
+            return topology
 
     def _build_command(self, netlist_path: Path, output_dir: Path) -> list[str]:
         command = shlex.split(self.cello_command) if isinstance(self.cello_command, str) else list(self.cello_command or [])
@@ -129,18 +138,35 @@ class CelloWrapper:
         raw_log: str,
         return_code: int | None = None,
     ) -> dict[str, Any]:
-        return {
+        topology = {
             "source": "external_cello_wrapper",
             "verilog_index": index,
             "verilog": code,
             "score": 0.0,
             "mapping_status": "MAPPING_FAILED",
             "error_type": "PART_ERROR",
+            "orthogonality_score": 1.0,
+            "cello_assignment_score": 0.0,
+            "cello_buildable": False,
             "mapping_error_category": category,
             "mapping_error_summary": summary,
             "raw_error_log": _truncate_error_log(raw_log, self.max_log_chars),
             "return_code": return_code,
         }
+        topology.update(_topology_cello_metrics(topology))
+        return topology
+
+
+def _topology_cello_metrics(topology: dict[str, Any]) -> dict[str, Any]:
+    metrics = evaluate_cello_constraints(topology)
+    return {
+        "orthogonality_score": metrics["orthogonality_score"],
+        "cello_assignment_score": metrics["cello_assignment_score"],
+        "cello_buildable": metrics["cello_buildable"],
+        "toxicity": metrics["toxicity"],
+        "toxicity_score": metrics["toxicity_score"],
+        "cello_constraint_report": metrics,
+    }
 
 
 def _classify_error_log(log: str) -> str:
