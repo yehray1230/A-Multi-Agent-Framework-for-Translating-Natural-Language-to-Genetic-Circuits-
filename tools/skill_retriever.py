@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+DEFAULT_SKILL_LIBRARY_PATH = "邏輯設計skill.json"
+
 
 @dataclass
 class SkillRetriever:
@@ -15,10 +17,14 @@ class SkillRetriever:
     @classmethod
     def from_json_file(
         cls,
-        path: str | Path = "邏輯設計skill.json",
+        path: str | Path = DEFAULT_SKILL_LIBRARY_PATH,
         min_confidence: float = 0.5,
     ) -> "SkillRetriever":
         skill_path = Path(path)
+        if not skill_path.exists() and not skill_path.is_absolute():
+            repo_relative_path = Path(__file__).resolve().parents[1] / skill_path
+            if repo_relative_path.exists():
+                skill_path = repo_relative_path
         data = json.loads(skill_path.read_text(encoding="utf-8"))
         if not isinstance(data, list):
             raise ValueError(f"Skill library must be a JSON list: {skill_path}")

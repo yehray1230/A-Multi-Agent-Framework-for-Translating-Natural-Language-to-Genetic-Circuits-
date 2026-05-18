@@ -1,0 +1,13 @@
+{
+  "model_name": "gpt-4o-mini",
+  "api_base": null,
+  "enable_rag": true,
+  "enable_ode": true,
+  "enable_skill_extraction": true,
+  "compute_budget": 2,
+  "monte_carlo_samples": 1,
+  "output_dir": "outputs/mcp_runs",
+  "cello_command": null,
+  "ucf_path": null
+}
+

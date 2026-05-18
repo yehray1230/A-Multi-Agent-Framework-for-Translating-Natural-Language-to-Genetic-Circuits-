@@ -20,6 +20,7 @@ ENV/
 .ode_cache/
 chroma_db/
 outputs/
+常用指令.txt
 
 # IDE/editor files
 .idea/

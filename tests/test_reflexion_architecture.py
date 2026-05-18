@@ -16,7 +16,7 @@ sys.modules.setdefault("litellm", litellm_stub)
 sys.modules.setdefault("litellm.exceptions", litellm_exceptions_stub)
 sys.modules.setdefault("litellm.caching", litellm_caching_stub)
 
-from agents.builder_agent import call_builder
+from agents.builder_agent import BuilderAgent, call_builder
 from agents.critic_agent import (
     CELLO_UCF_GUIDANCE,
     SEMANTIC_FAITHFULNESS_GUIDANCE_TEMPLATE,
@@ -155,6 +155,15 @@ def test_builder_rejects_missing_strategy(monkeypatch) -> None:
 
     assert state.last_error is not None
     assert "three-strategy JSON schema" in state.last_error
+
+
+def test_builder_agent_failure_does_not_mark_workflow_completed(monkeypatch) -> None:
+    monkeypatch.setattr("agents.builder_agent.call_llm", lambda **_: "ERROR: simulated builder failure.")
+
+    state = BuilderAgent(api_key=None, model_name="mock").run(DesignState(user_intent="A and not B"))
+
+    assert state.last_error == "ERROR: simulated builder failure."
+    assert state.is_completed is False
 
 
 def test_critic_routes_low_functional_score_to_logic_error(monkeypatch) -> None:

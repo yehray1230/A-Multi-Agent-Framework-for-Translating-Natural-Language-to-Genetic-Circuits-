@@ -82,6 +82,26 @@ def test_skill_retriever_loads_json_and_returns_motif_snippets() -> None:
     assert "Boolean template" in xor
 
 
+def test_skill_retriever_default_path_is_repo_relative(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    retriever = SkillRetriever.from_json_file()
+
+    assert len(retriever.skills) == 13
+
+
+def test_core_text_files_are_valid_utf8_without_replacement_characters() -> None:
+    for path in [
+        Path("README.md"),
+        Path("app.py"),
+        Path("agents/translator_agent.py"),
+        Path("agents/critic_agent.py"),
+        Path("tools/skill_retriever.py"),
+    ]:
+        text = path.read_text(encoding="utf-8")
+        assert "\ufffd" not in text
+
+
 def test_skill_retriever_uses_graph_tags_and_mode_pruning() -> None:
     retriever = SkillRetriever(
         skills=[
@@ -182,6 +202,21 @@ def test_functional_scorer_checks_truth_table_against_verilog() -> None:
     assert result.score == 1.0
     assert result.details["logic_compliance_score"] == 1.0
     assert result.details["truth_table_rows_checked"] == 3
+
+
+def test_functional_scorer_settles_gate_outputs_before_assigns() -> None:
+    result = score_functional(
+        {
+            "verilog": "module c(input A, output Y); wire n; not(n, A); assign Y = n; endmodule",
+            "truth_table": [
+                {"A": 0, "Y": 1},
+                {"A": 1, "Y": 0},
+            ],
+        }
+    )
+
+    assert result.score == 1.0
+    assert result.details["logic_failures"] == []
 
 
 def test_functional_scorer_penalizes_logic_mismatch() -> None:
