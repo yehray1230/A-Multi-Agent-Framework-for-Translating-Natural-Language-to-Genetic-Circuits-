@@ -280,5 +280,5 @@ class BuilderAgent(AgentProtocol):
             **self.kwargs,
         )
         if state.last_error:
-            state.is_completed = True
+            state.is_completed = False
         return state

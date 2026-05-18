@@ -25,11 +25,25 @@ MODE_COLORS = {
     "Exploitation": "#059669",
 }
 
+MODE_LABELS = {
+    "Exploration": "探索",
+    "Repair": "修正",
+    "Exploitation": "最佳化",
+}
+
 STATUS_COLORS = {
     "Pending": "#64748b",
     "Evaluated": "#2563eb",
     "Pass": "#059669",
     "Dead_End": "#dc2626",
+}
+
+STATUS_LABELS = {
+    "Pending": "待處理",
+    "Evaluated": "已評估",
+    "Pass": "通過",
+    "Dead_End": "無可行分支",
+    "Needs_Human_Input": "需要人工輸入",
 }
 
 ERROR_COLORS = {
@@ -39,15 +53,23 @@ ERROR_COLORS = {
     "BOTH": "#dc2626",
 }
 
+ERROR_LABELS = {
+    "NONE": "無",
+    "LOGIC_ERROR": "邏輯問題",
+    "PART_ERROR": "元件問題",
+    "BOTH": "邏輯與元件問題",
+}
+
 
 def main() -> None:
     if st is None:
-        print("Streamlit is not installed. Install requirements and run `streamlit run app.py`.")
+        print("尚未安裝 Streamlit。請先安裝 requirements，然後執行 `streamlit run app.py`。")
         return
 
-    st.set_page_config(page_title="Genetic Circuit Designer", layout="wide")
+    st.set_page_config(page_title="基因電路設計器", layout="wide")
     _inject_styles()
     _ensure_session_state()
+    _render_tutorial()
 
     state = st.session_state.design_state
     _render_sidebar(state)
@@ -56,8 +78,8 @@ def main() -> None:
         """
         <div class="app-header">
             <div>
-                <h1>Genetic Circuit Designer</h1>
-                <p>Natural language to Cello-compatible genetic circuits with tree search, Graph RAG, and critic-guided refinement.</p>
+                <h1>基因電路設計器</h1>
+                <p>將自然語言需求轉換為 Cello 相容基因電路，整合樹狀搜尋、圖譜 RAG 與評審回饋修正。</p>
             </div>
         </div>
         """,
@@ -231,51 +253,97 @@ def _ensure_session_state() -> None:
         }
     if "run_message" not in st.session_state:
         st.session_state.run_message = None
+    if "show_tutorial" not in st.session_state:
+        st.session_state.show_tutorial = False
+
+
+def _render_tutorial() -> None:
+    if not st.session_state.get("show_tutorial", False):
+        return
+
+    if hasattr(st, "dialog"):
+        @st.dialog("📖 系統使用導覽")
+        def tutorial_dialog():
+            st.markdown(
+                """
+                ### 歡迎使用基因電路設計器！
+                這是一個將自然語言轉換為基因電路的自動化工具。以下是簡單的使用步驟：
+                
+                1. **輸入需求**：在左側的「設計需求」框中，用自然語言描述想要的基因電路功能（例如：A 和 B 同時存在時輸出 Y）。
+                2. **設定參數**：選擇宿主生物、調整計算預算，並開關 RAG、ODE 模擬等功能。
+                3. **執行生成**：
+                   - **示範模式**：點擊「執行示範迭代」或「執行示範搜尋」，體驗系統流程。
+                   - **自備金鑰**：於「自備金鑰模型設定」輸入 API Key 後，點擊「執行自備金鑰工作流程」。
+                4. **檢視與分析**：在右側「結果檢視器」切換分頁，查看邏輯提案、Verilog、拓樸與評審回饋。
+                5. **下載狀態**：點擊左側底部的「匯出狀態 JSON」保存您的設計進度。
+                """
+            )
+            if st.button("開始使用", use_container_width=True):
+                st.session_state.show_tutorial = False
+                st.rerun()
+        tutorial_dialog()
+    else:
+        st.info(
+            "**📖 系統使用導覽**\n\n"
+            "歡迎使用基因電路設計器！以下是簡單的使用步驟：\n\n"
+            "1. **輸入需求**：在左側的「設計需求」框中，用自然語言描述想要的基因電路功能。\n"
+            "2. **設定參數**：選擇宿主生物、調整計算預算，並開關 RAG、ODE 模擬等功能。\n"
+            "3. **執行生成**：點擊「執行示範迭代」體驗系統流程，或於設定 API Key 後「執行自備金鑰工作流程」。\n"
+            "4. **檢視與分析**：在右側「結果檢視器」切換分頁，查看邏輯提案、Verilog、拓樸與評審回饋。\n"
+            "5. **下載狀態**：點擊左側底部的「匯出狀態 JSON」保存您的設計進度。"
+        )
+        if st.button("我知道了", key="close_tutorial_inline"):
+            st.session_state.show_tutorial = False
+            st.rerun()
 
 
 def _render_sidebar(state: DesignState) -> None:
     with st.sidebar:
-        st.header("Design Control")
+        st.header("設計控制")
+
+        st.button(
+            "📖 使用導覽",
+            use_container_width=True,
+            on_click=lambda: st.session_state.update(show_tutorial=True),
+        )
 
         state.user_intent = st.text_area(
-            "User intent",
+            "設計需求",
             value=state.user_intent,
             height=140,
-            placeholder="Example: Design a circuit that turns on GFP only when A is high and B is low.",
+            placeholder="範例：設計一個只有在 A 高、B 低時才啟動 GFP 的基因電路。",
         )
+        host_options = ["Escherichia coli", "Saccharomyces cerevisiae", "Bacillus subtilis", "自訂"]
         state.host_organism = st.selectbox(
-            "Host organism",
-            ["Escherichia coli", "Saccharomyces cerevisiae", "Bacillus subtilis", "Custom"],
-            index=_safe_index(
-                ["Escherichia coli", "Saccharomyces cerevisiae", "Bacillus subtilis", "Custom"],
-                state.host_organism,
-            ),
+            "宿主生物",
+            host_options,
+            index=_safe_index(host_options, state.host_organism),
         )
-        if state.host_organism == "Custom":
-            state.host_organism = st.text_input("Custom host", value="Custom host")
+        if state.host_organism == "自訂":
+            state.host_organism = st.text_input("自訂宿主", value="自訂宿主")
 
-        state.compute_budget = st.slider("Compute budget", min_value=1, max_value=20, value=state.compute_budget)
+        state.compute_budget = st.slider("計算預算", min_value=1, max_value=20, value=state.compute_budget)
 
-        st.subheader("Workflow Options")
+        st.subheader("工作流程選項")
         options = st.session_state.ui_options
-        options["enable_rag"] = st.toggle("Graph RAG", value=options["enable_rag"])
-        options["enable_ode"] = st.toggle("ODE simulation", value=options["enable_ode"])
-        options["enable_tree_search"] = st.toggle("Multi-agent tree search", value=options["enable_tree_search"])
-        options["enable_cache"] = st.toggle("Caching", value=options["enable_cache"])
+        options["enable_rag"] = st.toggle("圖譜 RAG", value=options["enable_rag"])
+        options["enable_ode"] = st.toggle("ODE 模擬", value=options["enable_ode"])
+        options["enable_tree_search"] = st.toggle("多代理樹狀搜尋", value=options["enable_tree_search"])
+        options["enable_cache"] = st.toggle("快取", value=options["enable_cache"])
 
         _render_byok_controls()
 
-        st.subheader("Execution")
-        if st.button("Run Demo Iteration", type="primary", use_container_width=True):
+        st.subheader("執行")
+        if st.button("執行示範迭代", type="primary", use_container_width=True):
             if not state.user_intent.strip():
-                st.session_state.run_message = ("warning", "Please enter a design intent before running the workflow.")
+                st.session_state.run_message = ("warning", "請先輸入設計需求再執行工作流程。")
             else:
                 _run_demo_iteration(state)
             st.rerun()
 
-        if st.button("Run Demo Search", use_container_width=True):
+        if st.button("執行示範搜尋", use_container_width=True):
             if not state.user_intent.strip():
-                st.session_state.run_message = ("warning", "Please enter a design intent before running the workflow.")
+                st.session_state.run_message = ("warning", "請先輸入設計需求再執行工作流程。")
             else:
                 if not state.tree_nodes:
                     _run_demo_iteration(state)
@@ -283,18 +351,18 @@ def _render_sidebar(state: DesignState) -> None:
                     _run_demo_iteration(state)
             st.rerun()
 
-        if st.button("Run BYOK Workflow", use_container_width=True):
+        if st.button("執行自備金鑰工作流程", use_container_width=True):
             _run_byok_workflow(state)
             st.rerun()
 
-        if st.button("Reset", use_container_width=True):
+        if st.button("重設", use_container_width=True):
             st.session_state.design_state = DesignState()
             st.session_state.selected_node_id = None
             st.session_state.run_message = None
             st.rerun()
 
         st.download_button(
-            "Export State JSON",
+            "匯出狀態 JSON",
             data=json.dumps(asdict(state), indent=2, ensure_ascii=False),
             file_name="genetic_circuit_design_state.json",
             mime="application/json",
@@ -302,13 +370,13 @@ def _render_sidebar(state: DesignState) -> None:
         )
 
         _render_run_message()
-        st.caption("Demo execution creates deterministic sample nodes. BYOK execution uses your API key only for the current session and does not export it.")
+        st.caption("示範執行會產生可重現的範例節點。自備金鑰執行只會在目前工作階段使用你的 API key，不會匯出。")
 
 
 def _render_status_strip(state: DesignState) -> None:
     best_score = _best_score(state)
-    active_node = state.current_node_id or "Not started"
-    status = "Completed" if state.is_completed else ("Running" if state.tree_nodes else "Ready")
+    active_node = state.current_node_id or "尚未開始"
+    status = "已完成" if state.is_completed else ("執行中" if state.tree_nodes else "待命")
     budget_text = f"{state.used_budget} / {state.compute_budget}"
     error_type = state.error_type
     if state.current_node_id and state.current_node_id in state.tree_nodes:
@@ -316,11 +384,11 @@ def _render_status_strip(state: DesignState) -> None:
 
     cols = st.columns(5, gap="small")
     cards = [
-        ("Status", status),
-        ("Budget", budget_text),
-        ("Current Node", active_node),
-        ("Best Score", "N/A" if best_score is None else f"{best_score:.2f}"),
-        ("Latest Error", error_type),
+        ("狀態", status),
+        ("預算", budget_text),
+        ("目前節點", active_node),
+        ("最佳分數", "無資料" if best_score is None else f"{best_score:.2f}"),
+        ("最新問題", ERROR_LABELS.get(error_type, error_type)),
     ]
     for col, (label, value) in zip(cols, cards):
         with col:
@@ -342,24 +410,25 @@ def _render_byok_controls() -> None:
         "OpenRouter": ["openrouter/openai/gpt-4o-mini", "openrouter/anthropic/claude-3.5-sonnet"],
         "Anthropic": ["anthropic/claude-3-5-sonnet-20241022", "anthropic/claude-3-5-haiku-20241022"],
         "Google": ["gemini/gemini-1.5-flash", "gemini/gemini-1.5-pro"],
+        "Groq": ["groq/llama-3.3-70b-versatile", "groq/llama-3.1-8b-instant", "groq/mixtral-8x7b-32768"],
         "Custom LiteLLM": [config.get("model_name", "custom/model") or "custom/model"],
     }
 
-    with st.expander("BYOK Model Settings", expanded=False):
+    with st.expander("自備金鑰模型設定", expanded=False):
         provider_names = list(model_presets)
         config["provider"] = st.selectbox(
-            "Provider",
+            "服務提供者",
             provider_names,
             index=_safe_index(provider_names, config.get("provider")),
         )
         preset_models = model_presets[config["provider"]]
         selected_model = st.selectbox(
-            "Model preset",
+            "模型預設",
             preset_models,
             index=_safe_index(preset_models, config.get("model_name")),
         )
         config["model_name"] = st.text_input(
-            "LiteLLM model name",
+            "LiteLLM 模型名稱",
             value=config.get("model_name") or selected_model,
             placeholder=selected_model,
         )
@@ -367,12 +436,12 @@ def _render_byok_controls() -> None:
             "API key",
             value=config.get("api_key", ""),
             type="password",
-            placeholder="Paste your provider key for this session",
+            placeholder="貼上此工作階段要使用的服務金鑰",
         )
         config["api_base"] = st.text_input(
             "API base URL",
             value=config.get("api_base", ""),
-            placeholder="Optional, for OpenRouter or self-hosted endpoints",
+            placeholder="選填，供 OpenRouter 或自架端點使用",
         )
 
 
@@ -390,17 +459,17 @@ def _render_run_message() -> None:
 
 
 def _render_pipeline(state: DesignState) -> None:
-    st.markdown('<div class="section-title">Workflow Progress</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">工作流程進度</div>', unsafe_allow_html=True)
     current_step = _current_step(state)
     steps = [
-        ("Intent", bool(state.user_intent.strip()), "Natural language goal"),
-        ("RAG Retrieval", bool(state.rag_context), "Historical rules"),
-        ("Builder", bool(state.logic_proposals), "Logic proposals"),
-        ("Translator", bool(state.verilog_codes), "Cello Verilog"),
-        ("Cello Mapping", bool(state.candidate_topologies), "Topology candidates"),
-        ("ODE Simulation", any("ode_status" in topo for topo in state.candidate_topologies), "Dynamic score"),
-        ("Critic", bool(state.critic_feedbacks), "Feedback routing"),
-        ("Consolidator", state.best_topology is not None, "Best result"),
+        ("需求", bool(state.user_intent.strip()), "自然語言目標"),
+        ("RAG 檢索", bool(state.rag_context), "歷史規則"),
+        ("設計生成器", bool(state.logic_proposals), "邏輯提案"),
+        ("轉譯器", bool(state.verilog_codes), "Cello Verilog"),
+        ("Cello 映射", bool(state.candidate_topologies), "拓樸候選"),
+        ("ODE 模擬", any("ode_status" in topo for topo in state.candidate_topologies), "動態分數"),
+        ("評審代理", bool(state.critic_feedbacks), "回饋分流"),
+        ("整合器", state.best_topology is not None, "最佳結果"),
     ]
     step_html = ['<div class="step-grid">']
     for index, (label, done, caption) in enumerate(steps):
@@ -408,22 +477,20 @@ def _render_pipeline(state: DesignState) -> None:
         if index == current_step:
             class_name += " active"
         step_html.append(
-            f"""
-            <div class="{class_name}">
-                <div class="step-label">{label}</div>
-                <div class="step-caption">{caption}</div>
-            </div>
-            """
+            f'<div class="{class_name}">'
+            f'<div class="step-label">{label}</div>'
+            f'<div class="step-caption">{caption}</div>'
+            "</div>"
         )
     step_html.append("</div>")
     st.markdown("".join(step_html), unsafe_allow_html=True)
 
 
 def _render_chart_overview(state: DesignState) -> None:
-    st.markdown('<div class="section-title">Design Analytics</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">設計分析</div>', unsafe_allow_html=True)
     if not state.tree_nodes:
         st.markdown(
-            '<div class="empty-state">Charts appear after the workflow produces evaluated nodes or topology candidates.</div>',
+            '<div class="empty-state">工作流程產生已評估節點或拓樸候選後，這裡會顯示圖表。</div>',
             unsafe_allow_html=True,
         )
         return
@@ -432,27 +499,27 @@ def _render_chart_overview(state: DesignState) -> None:
     topology_rows = _topology_chart_rows(state)
     left, right = st.columns(2, gap="medium")
     with left:
-        st.caption("Node score progression")
+        st.caption("節點分數變化")
         if pd is not None and score_rows:
             chart_df = pd.DataFrame(score_rows).set_index("node")
             st.line_chart(chart_df[["score"]], use_container_width=True)
         else:
-            st.info("No finite node scores yet.")
+            st.info("目前尚無有效的節點分數。")
     with right:
-        st.caption("Candidate topology scores")
+        st.caption("候選拓樸分數")
         if pd is not None and topology_rows:
             chart_df = pd.DataFrame(topology_rows).set_index("candidate")
             st.bar_chart(chart_df[["score"]], use_container_width=True)
         else:
-            st.info("No topology scores yet.")
+            st.info("目前尚無拓樸分數。")
 
 
 def _render_tree_workspace(state: DesignState) -> None:
-    st.markdown('<div class="section-title">Tree Search Workspace</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">樹狀搜尋工作區</div>', unsafe_allow_html=True)
 
     if not state.tree_nodes:
         st.markdown(
-            '<div class="empty-state">Enter a design intent, then run a demo iteration to create the root search node.</div>',
+            '<div class="empty-state">請輸入設計需求，接著執行一次示範迭代來建立根搜尋節點。</div>',
             unsafe_allow_html=True,
         )
         return
@@ -461,13 +528,13 @@ def _render_tree_workspace(state: DesignState) -> None:
     for node in state.tree_nodes.values():
         table_rows.append(
             {
-                "Node": node.node_id,
-                "Parent": node.parent_id or "-",
-                "Mode": node.search_mode,
-                "Status": node.status,
-                "Score": None if not math.isfinite(node.score) else round(node.score, 3),
-                "Error": node.error_type,
-                "Children": len(node.children_ids),
+                "節點": node.node_id,
+                "父節點": node.parent_id or "-",
+                "模式": MODE_LABELS.get(node.search_mode, node.search_mode),
+                "狀態": STATUS_LABELS.get(node.status, node.status),
+                "分數": None if not math.isfinite(node.score) else round(node.score, 3),
+                "問題": ERROR_LABELS.get(node.error_type, node.error_type),
+                "子節點數": len(node.children_ids),
             }
         )
 
@@ -478,7 +545,7 @@ def _render_tree_workspace(state: DesignState) -> None:
 
     node_ids = list(state.tree_nodes.keys())
     default_node = st.session_state.selected_node_id or state.current_node_id or node_ids[0]
-    selected = st.selectbox("Inspect node", node_ids, index=_safe_index(node_ids, default_node))
+    selected = st.selectbox("檢視節點", node_ids, index=_safe_index(node_ids, default_node))
     st.session_state.selected_node_id = selected
 
     node = state.tree_nodes[selected]
@@ -490,11 +557,11 @@ def _render_tree_workspace(state: DesignState) -> None:
         <div class="node-card">
             <div class="node-title">{node.node_id}</div>
             <div class="node-meta">
-                <span class="pill" style="background:{mode_color};">{node.search_mode}</span>
-                <span class="pill" style="background:{status_color};">{node.status}</span>
-                <span class="pill" style="background:{error_color};">{node.error_type}</span>
+                <span class="pill" style="background:{mode_color};">{MODE_LABELS.get(node.search_mode, node.search_mode)}</span>
+                <span class="pill" style="background:{status_color};">{STATUS_LABELS.get(node.status, node.status)}</span>
+                <span class="pill" style="background:{error_color};">{ERROR_LABELS.get(node.error_type, node.error_type)}</span>
             </div>
-            <div class="node-meta">Parent: {node.parent_id or "None"} | Children: {", ".join(node.children_ids) or "None"}</div>
+            <div class="node-meta">父節點：{node.parent_id or "無"} | 子節點：{", ".join(node.children_ids) or "無"}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -502,37 +569,37 @@ def _render_tree_workspace(state: DesignState) -> None:
 
 
 def _render_inspector(state: DesignState) -> None:
-    st.markdown('<div class="section-title">Result Inspector</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">結果檢視器</div>', unsafe_allow_html=True)
     node = _selected_node(state)
 
     if node is None:
         st.markdown(
-            '<div class="empty-state">No node selected yet. Run the workflow to inspect proposals, Verilog, topology, and critic feedback.</div>',
+            '<div class="empty-state">尚未選取節點。執行工作流程後即可檢視提案、Verilog、拓樸與評審回饋。</div>',
             unsafe_allow_html=True,
         )
         return
 
     proposal_tab, verilog_tab, topology_tab, charts_tab, critic_tab, rag_tab, raw_tab = st.tabs(
-        ["Proposals", "Verilog", "Topology", "Charts", "Critic", "RAG Context", "Raw State"]
+        ["提案", "Verilog", "拓樸", "圖表", "評審", "RAG 內容", "原始狀態"]
     )
 
     with proposal_tab:
         proposals = node.logic_proposals or state.logic_proposals
         if proposals:
             for index, proposal in enumerate(proposals, start=1):
-                with st.expander(f"Proposal {index}", expanded=index == 1):
+                with st.expander(f"提案 {index}", expanded=index == 1):
                     _render_json_or_text(proposal)
         else:
-            st.info("No logic proposals generated for this node yet.")
+            st.info("這個節點尚未產生邏輯提案。")
 
     with verilog_tab:
         codes = node.verilog_codes or state.verilog_codes
         if codes:
-            selected_code = st.radio("Verilog candidate", [f"Candidate {i + 1}" for i in range(len(codes))], horizontal=True)
+            selected_code = st.radio("Verilog 候選", [f"候選 {i + 1}" for i in range(len(codes))], horizontal=True)
             code_index = int(selected_code.split()[-1]) - 1
             st.markdown(f'<div class="code-panel">{_escape_html(codes[code_index])}</div>', unsafe_allow_html=True)
         else:
-            st.info("No Verilog generated for this node yet.")
+            st.info("這個節點尚未產生 Verilog。")
 
     with topology_tab:
         topologies = node.candidate_topologies or state.candidate_topologies
@@ -549,19 +616,19 @@ def _render_inspector(state: DesignState) -> None:
                 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
             else:
                 st.table(rows)
-            st.subheader("Best topology")
+            st.subheader("最佳拓樸")
             st.json(node.best_topology or state.best_topology or {})
         else:
-            st.info("No topology candidates available yet.")
+            st.info("目前尚無拓樸候選。")
 
     with charts_tab:
         _render_topology_charts(node, state)
 
     with critic_tab:
         cols = st.columns(3)
-        cols[0].metric("Approved", "Yes" if node.is_approved else "No")
-        cols[1].metric("Error Type", node.error_type)
-        cols[2].metric("Score", "N/A" if not math.isfinite(node.score) else f"{node.score:.2f}")
+        cols[0].metric("是否通過", "是" if node.is_approved else "否")
+        cols[1].metric("問題類型", ERROR_LABELS.get(node.error_type, node.error_type))
+        cols[2].metric("分數", "無資料" if not math.isfinite(node.score) else f"{node.score:.2f}")
         if node.critic_feedbacks:
             for feedback in node.critic_feedbacks:
                 st.warning(feedback)
@@ -569,39 +636,39 @@ def _render_inspector(state: DesignState) -> None:
             for feedback in state.critic_feedbacks:
                 st.warning(feedback)
         else:
-            st.info("No critic feedback yet.")
+            st.info("目前尚無評審回饋。")
         if node.last_error:
             st.error(node.last_error)
 
     with rag_tab:
         if state.rag_context:
-            st.text_area("Retrieved context", value=state.rag_context, height=260)
+            st.text_area("檢索內容", value=state.rag_context, height=260)
         else:
-            st.info("No RAG context retrieved yet.")
+            st.info("目前尚未檢索 RAG 內容。")
 
     with raw_tab:
         st.json(asdict(node))
-        with st.expander("Full DesignState"):
+        with st.expander("完整 DesignState"):
             st.json(asdict(state))
 
 
 def _render_topology_charts(node: SearchNode, state: DesignState) -> None:
     if pd is None:
-        st.info("Install pandas to enable chart rendering in Streamlit.")
+        st.info("請安裝 pandas 以啟用 Streamlit 圖表渲染。")
         return
 
     topologies = node.candidate_topologies or state.candidate_topologies
     if not topologies:
-        st.info("No topology candidates available for charts yet.")
+        st.info("目前沒有可用於圖表的拓樸候選。")
         return
 
     chart_df = pd.DataFrame(_topology_rows(topologies)).set_index("candidate")
-    st.caption("Score by topology candidate")
+    st.caption("各拓樸候選分數")
     st.bar_chart(chart_df[["score"]], use_container_width=True)
 
     metric_cols = [column for column in ["gate_count", "dynamic_margin"] if column in chart_df.columns]
     if metric_cols:
-        st.caption("Implementation complexity and dynamic margin")
+        st.caption("實作複雜度與動態裕度")
         st.line_chart(chart_df[metric_cols], use_container_width=True)
 
 
@@ -661,13 +728,13 @@ def _run_demo_iteration(state: DesignState) -> None:
 def _run_byok_workflow(state: DesignState) -> None:
     config = st.session_state.llm_config
     if not state.user_intent.strip():
-        st.session_state.run_message = ("warning", "Please enter a design intent before running the BYOK workflow.")
+        st.session_state.run_message = ("warning", "請先輸入設計需求再執行自備金鑰工作流程。")
         return
     if not config.get("api_key", "").strip():
-        st.session_state.run_message = ("warning", "Please enter an API key in BYOK Model Settings.")
+        st.session_state.run_message = ("warning", "請在自備金鑰模型設定中輸入 API key。")
         return
     if not config.get("model_name", "").strip():
-        st.session_state.run_message = ("warning", "Please choose or enter a LiteLLM model name.")
+        st.session_state.run_message = ("warning", "請選擇或輸入 LiteLLM 模型名稱。")
         return
 
     try:
@@ -684,7 +751,7 @@ def _run_byok_workflow(state: DesignState) -> None:
         from vector_db import InMemoryVectorDB
         from workflows.reflexion_controller import run_reflexion_workflow
     except Exception as exc:
-        st.session_state.run_message = ("error", f"Could not load workflow components: {exc}")
+        st.session_state.run_message = ("error", f"無法載入工作流程元件：{exc}")
         return
 
     class TranslatorRunner:
@@ -724,7 +791,7 @@ def _run_byok_workflow(state: DesignState) -> None:
             skill_extractor=SkillExtractorAgent(vault_dir="outputs/obsidian_skills", vector_db=InMemoryVectorDB()),
         )
     except Exception as exc:
-        state.last_error = f"ERROR: BYOK workflow failed: {exc}"
+        state.last_error = f"錯誤：自備金鑰工作流程失敗：{exc}"
         st.session_state.run_message = ("error", state.last_error)
         return
 
@@ -733,7 +800,7 @@ def _run_byok_workflow(state: DesignState) -> None:
     if result_state.last_error:
         st.session_state.run_message = ("error", result_state.last_error)
     else:
-        st.session_state.run_message = ("success", "BYOK workflow completed. Inspect the generated nodes, Verilog, topology, and charts.")
+        st.session_state.run_message = ("success", "自備金鑰工作流程已完成。請檢視產生的節點、Verilog、拓樸與圖表。")
 
 
 class _NoOpODESimulator:
@@ -746,12 +813,12 @@ class _NoOpODESimulator:
 
 
 def _demo_proposals(state: DesignState, node: SearchNode) -> list[str]:
-    base_intent = state.user_intent.strip() or "Design a genetic logic circuit"
-    repair_hint = " incorporating critic feedback" if node.search_mode == "Repair" else ""
+    base_intent = state.user_intent.strip() or "設計一個基因邏輯電路"
+    repair_hint = "，並納入評審回饋" if node.search_mode == "Repair" else ""
     blueprints = [
-        ("proposal_a", "Minimize biological part cost", "Y = A AND NOT B", 2, 3, ["PRESERVE_SIMPLE_GATES"]),
-        ("proposal_b", "Minimize logic depth and delay", "Y = A OR B", 1, 4, []),
-        ("proposal_c", "Prioritize robustness under noisy inputs", "Y = (A AND NOT B) OR (A AND C)", 3, 5, ["USE_STRUCTURAL_INSTANTIATION"]),
+        ("proposal_a", "降低生物元件成本", "Y = A AND NOT B", 2, 3, ["PRESERVE_SIMPLE_GATES"]),
+        ("proposal_b", "降低邏輯深度與延遲", "Y = A OR B", 1, 4, []),
+        ("proposal_c", "優先提高雜訊輸入下的穩健性", "Y = (A AND NOT B) OR (A AND C)", 3, 5, ["USE_STRUCTURAL_INSTANTIATION"]),
     ]
     proposals = []
     for key, strategy, blueprint, depth, cost, directives in blueprints:
@@ -759,7 +826,7 @@ def _demo_proposals(state: DesignState, node: SearchNode) -> list[str]:
             json.dumps(
                 {
                     "id": key,
-                    "strategy_description": f"{strategy}{repair_hint} for: {base_intent}",
+                    "strategy_description": f"{strategy}{repair_hint}；需求：{base_intent}",
                     "total_logic_depth": depth,
                     "total_repressor_cost": cost,
                     "logic_blueprint": blueprint,
@@ -822,20 +889,20 @@ def _demo_critic_and_branch(state: DesignState, node: SearchNode, enable_tree_se
 
     if approved:
         node.error_type = "NONE"
-        node.critic_feedbacks.append("Design passes the demo threshold. Consolidate this topology as the current best result.")
+        node.critic_feedbacks.append("設計已通過示範門檻。請將此拓樸整合為目前最佳結果。")
         state.is_completed = True
         return
 
     state.used_budget += 1
     if node.search_mode == "Exploration":
         node.error_type = "LOGIC_ERROR"
-        node.critic_feedbacks.append("Logic is plausible but underspecified. Add a repair branch that preserves the intent and tightens Boolean behavior.")
+        node.critic_feedbacks.append("邏輯方向合理，但規格仍不夠明確。請新增修正分支，在保留需求的前提下收斂布林行為。")
     elif node.search_mode == "Repair":
         node.error_type = "PART_ERROR"
-        node.critic_feedbacks.append("Logic is now acceptable, but part mapping can improve. Try exploitation without changing the architecture.")
+        node.critic_feedbacks.append("邏輯目前可接受，但元件 mapping 仍可改善。請在不改變架構的前提下進行最佳化。")
     else:
         node.error_type = "PART_ERROR"
-        node.critic_feedbacks.append("Part assignment still needs tuning. Keep the best-scoring topology as fallback.")
+        node.critic_feedbacks.append("元件指派仍需要微調。請保留最高分拓樸作為備用結果。")
 
     if not enable_tree_search:
         return
@@ -901,10 +968,10 @@ def _select_best_fallback(state: DesignState) -> None:
 def _demo_rag_context(intent: str, mode: str) -> str:
     return "\n".join(
         [
-            f"Mode-aware retrieval: {mode}",
-            "Prefer Cello-compatible combinational logic: primitive gates, wire, assign.",
-            "Avoid always blocks, registers, clocks, latches, memories, and delay syntax.",
-            f"Intent keywords: {', '.join(intent.lower().split()[:8]) or 'not provided'}",
+            f"模式感知檢索：{MODE_LABELS.get(mode, mode)}",
+            "優先使用 Cello 相容的組合邏輯：primitive gates、wire、assign。",
+            "避免 always blocks、registers、clocks、latches、memories 與 delay syntax。",
+            f"需求關鍵字：{', '.join(intent.lower().split()[:8]) or '未提供'}",
         ]
     )
 
@@ -936,7 +1003,7 @@ def _topology_chart_rows(state: DesignState) -> list[dict[str, Any]]:
 def _topology_rows(topologies: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for index, topology in enumerate(topologies):
-        candidate = f"Candidate {int(topology.get('verilog_index', index)) + 1}"
+        candidate = f"候選 {int(topology.get('verilog_index', index)) + 1}"
         rows.append(
             {
                 "candidate": candidate,

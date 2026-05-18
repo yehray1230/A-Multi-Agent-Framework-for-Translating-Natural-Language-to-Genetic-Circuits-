@@ -91,16 +91,29 @@ def _simulate_verilog(verilog: str, inputs: dict[str, bool], output_key: str) ->
     env = {key: bool(value) for key, value in inputs.items()}
 
     assignments = re.findall(r"\bassign\s+([A-Za-z_]\w*)\s*=\s*(.*?);", source, flags=re.DOTALL)
-    for target, expr in assignments:
-        env[target] = _eval_expr(expr, env)
+    primitive_calls = _primitive_calls(source)
 
-    for gate, args_text in _primitive_calls(source):
-        args = [arg.strip() for arg in args_text.split(",") if arg.strip()]
-        if len(args) < 2:
-            continue
-        out = args[0]
-        values = [bool(env.get(arg, False)) for arg in args[1:]]
-        env[out] = _eval_gate(gate.lower(), values)
+    for _ in range(max(1, len(assignments) + len(primitive_calls) + 1)):
+        changed = False
+        for gate, args_text in primitive_calls:
+            args = [arg.strip() for arg in args_text.split(",") if arg.strip()]
+            if len(args) < 2:
+                continue
+            out = args[0]
+            values = [bool(env.get(arg, False)) for arg in args[1:]]
+            value = _eval_gate(gate.lower(), values)
+            if env.get(out) is not value:
+                env[out] = value
+                changed = True
+
+        for target, expr in assignments:
+            value = _eval_expr(expr, env)
+            if env.get(target) is not value:
+                env[target] = value
+                changed = True
+
+        if not changed:
+            break
 
     return env.get(output_key)
 
