@@ -18,7 +18,7 @@ from vector_db import InMemoryVectorDB
 from workflows.reflexion_controller import run_reflexion_workflow
 
 
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-5.4-mini"
 DEFAULT_RUN_STORE = RunStore()
 
 

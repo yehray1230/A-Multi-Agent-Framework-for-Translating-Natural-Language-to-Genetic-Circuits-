@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import uuid
 from dataclasses import asdict
 from typing import Any
@@ -36,6 +37,7 @@ STATUS_COLORS = {
     "Evaluated": "#2563eb",
     "Pass": "#059669",
     "Dead_End": "#dc2626",
+    "Needs_Human_Input": "#ea580c",
 }
 
 STATUS_LABELS = {
@@ -87,6 +89,7 @@ def main() -> None:
     )
 
     _render_status_strip(state)
+    _render_human_loop_panel(state)
 
     work_col, inspector_col = st.columns([1.45, 1], gap="large")
     with work_col:
@@ -216,6 +219,53 @@ def _inject_styles() -> None:
                 font-size: 0.75rem;
                 margin-top: 0.25rem;
             }
+            .topology-card {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                margin-bottom: 0.85rem;
+                padding: 0.85rem;
+            }
+            .topology-card.best {
+                border-color: #059669;
+                box-shadow: inset 0 0 0 1px #059669;
+            }
+            .topology-title {
+                color: #0f172a;
+                font-size: 0.95rem;
+                font-weight: 760;
+            }
+            .topology-subtitle {
+                color: #64748b;
+                font-size: 0.75rem;
+                margin-top: 0.2rem;
+            }
+            .topology-metrics {
+                display: grid;
+                gap: 0.4rem;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                margin-top: 0.7rem;
+            }
+            .topology-metric {
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                min-height: 58px;
+                padding: 0.5rem;
+            }
+            .topology-metric-label {
+                color: #64748b;
+                font-size: 0.68rem;
+                font-weight: 700;
+                text-transform: uppercase;
+            }
+            .topology-metric-value {
+                color: #0f172a;
+                font-size: 0.88rem;
+                font-weight: 760;
+                margin-top: 0.18rem;
+                overflow-wrap: anywhere;
+            }
             .code-panel {
                 background: #0f172a;
                 border-radius: 8px;
@@ -225,6 +275,31 @@ def _inject_styles() -> None:
                 overflow-x: auto;
                 padding: 0.8rem;
                 white-space: pre;
+            }
+            .hitl-panel {
+                background: #fff7ed;
+                border: 1px solid #fed7aa;
+                border-radius: 8px;
+                margin: 0.9rem 0 1rem 0;
+                padding: 0.95rem;
+            }
+            .hitl-panel h2 {
+                color: #9a3412;
+                font-size: 1rem;
+                font-weight: 760;
+                letter-spacing: 0;
+                margin: 0 0 0.35rem 0;
+            }
+            .hitl-panel p {
+                color: #7c2d12;
+                font-size: 0.88rem;
+                margin: 0.25rem 0;
+            }
+            .hitl-meta {
+                color: #9a3412;
+                font-size: 0.78rem;
+                font-weight: 700;
+                margin-top: 0.55rem;
             }
         </style>
         """,
@@ -247,7 +322,7 @@ def _ensure_session_state() -> None:
     if "llm_config" not in st.session_state:
         st.session_state.llm_config = {
             "provider": "OpenAI",
-            "model_name": "gpt-4o-mini",
+            "model_name": "gpt-5.4-mini",
             "api_base": "",
             "api_key": "",
         }
@@ -406,11 +481,28 @@ def _render_status_strip(state: DesignState) -> None:
 def _render_byok_controls() -> None:
     config = st.session_state.llm_config
     model_presets = {
-        "OpenAI": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],
-        "OpenRouter": ["openrouter/openai/gpt-4o-mini", "openrouter/anthropic/claude-3.5-sonnet"],
-        "Anthropic": ["anthropic/claude-3-5-sonnet-20241022", "anthropic/claude-3-5-haiku-20241022"],
-        "Google": ["gemini/gemini-1.5-flash", "gemini/gemini-1.5-pro"],
-        "Groq": ["groq/llama-3.3-70b-versatile", "groq/llama-3.1-8b-instant", "groq/mixtral-8x7b-32768"],
+        "OpenAI": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
+        "OpenRouter": [
+            "openrouter/openai/gpt-5.4",
+            "openrouter/anthropic/claude-sonnet-4-6",
+            "openrouter/google/gemini-3.1-pro-preview",
+        ],
+        "Anthropic": [
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-opus-4-7",
+            "anthropic/claude-haiku-4-5-20251001",
+        ],
+        "Google": [
+            "gemini/gemini-3.5-flash",
+            "gemini/gemini-3.1-pro-preview",
+            "gemini/gemini-3.1-flash-lite",
+            "gemini/gemini-2.5-pro",
+        ],
+        "Groq": [
+            "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+            "groq/llama-3.1-8b-instant",
+            "groq/qwen/qwen3-32b",
+        ],
         "Custom LiteLLM": [config.get("model_name", "custom/model") or "custom/model"],
     }
 
@@ -456,6 +548,126 @@ def _render_run_message() -> None:
         st.error(text)
     else:
         st.warning(text)
+
+
+def _render_human_loop_panel(state: DesignState) -> None:
+    if not state.requires_human_input:
+        return
+
+    selected_node = _selected_node(state)
+    prompt = state.human_feedback_prompt or state.latest_critic_feedback or "系統需要更多限制或偏好，才能安全地繼續搜尋。"
+    reason_label = _pause_reason_label(state.pause_reason)
+    best_score = _best_score(state)
+    fallback_text = "目前尚無可用的備用拓樸。"
+    if state.best_topology:
+        fallback_score = state.best_topology.get("score", best_score)
+        fallback_mapping = state.best_topology.get("mapping_status", "unknown")
+        fallback_text = f"目前最佳備用拓樸分數 {fallback_score}，mapping 狀態為 {fallback_mapping}。"
+    escaped_fallback_text = _escape_html(fallback_text)
+
+    st.markdown(
+        f"""
+        <div class="hitl-panel">
+            <h2>需要人工介入</h2>
+            <p><strong>暫停原因：</strong>{_escape_html(reason_label)}</p>
+            <p><strong>系統請求：</strong>{_escape_html(prompt)}</p>
+            <div class="hitl-meta">目前節點：{_escape_html(selected_node.node_id if selected_node else "無")} | {escaped_fallback_text}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if state.human_constraints:
+        with st.expander("已套用的人工限制", expanded=False):
+            for constraint in state.human_constraints:
+                st.write(f"- {constraint}")
+
+    with st.form("human_loop_guidance_form"):
+        guidance = st.text_area(
+            "補充給系統的限制或偏好",
+            height=110,
+            placeholder="例如：優先降低 gate count；允許犧牲一點動態裕度；避免使用特定 promoter；保留目前最佳拓樸作為 fallback。",
+        )
+        action = st.radio(
+            "下一步",
+            [
+                "加入限制並接續既有搜尋",
+                "加入限制並建立修正分支",
+                "加入限制並建立元件最佳化分支",
+                "接受目前最佳拓樸作為結果",
+            ],
+            horizontal=False,
+        )
+        extra_budget = st.number_input("追加計算預算", min_value=0, max_value=20, value=2, step=1)
+        submitted = st.form_submit_button("套用人工回饋", type="primary", use_container_width=True)
+
+    if submitted:
+        _apply_human_guidance(state, guidance, action, int(extra_budget))
+        st.rerun()
+
+
+def _pause_reason_label(reason: str | None) -> str:
+    labels = {
+        "compute_budget_exceeded": "計算預算已用完，尚未得到通過結果",
+        "critic_requested_human_input": "評審代理判斷需要人工補充限制",
+        "critic_unrecoverable": "評審代理判斷目前條件不足以自動修復",
+        "repeated_error_type": "同類問題重複出現，需要改變搜尋方向",
+        "no_recoverable_route": "評審回饋沒有明確可自動修復的路線",
+        "frontier_exhausted": "所有搜尋分支都已耗盡",
+    }
+    return labels.get(reason or "", reason or "系統等待人工確認")
+
+
+def _apply_human_guidance(state: DesignState, guidance: str, action: str, extra_budget: int) -> None:
+    constraints = [line.strip("- ").strip() for line in guidance.splitlines() if line.strip()]
+    state.human_constraints.extend(constraint for constraint in constraints if constraint)
+    if extra_budget:
+        state.compute_budget += extra_budget
+
+    if action == "接受目前最佳拓樸作為結果":
+        _select_best_fallback(state)
+        state.is_completed = state.best_topology is not None
+        state.requires_human_input = False
+        state.pause_reason = None
+        state.human_feedback_prompt = None
+        st.session_state.run_message = (
+            "success",
+            "已接受目前最佳拓樸作為結果。" if state.best_topology else "目前沒有可接受的最佳拓樸，請改用修正或最佳化分支繼續搜尋。",
+        )
+        return
+
+    if action == "加入限制並建立修正分支":
+        _create_guided_child(state, "Repair")
+    elif action == "加入限制並建立元件最佳化分支":
+        _create_guided_child(state, "Exploitation")
+
+    current_node = state.tree_nodes.get(state.current_node_id) if state.current_node_id else None
+    if current_node and current_node.status == "Needs_Human_Input":
+        current_node.status = "Evaluated"
+    state.requires_human_input = False
+    state.pause_reason = None
+    state.human_feedback_prompt = None
+    st.session_state.run_message = ("success", "已套用人工回饋。請繼續執行下一輪搜尋。")
+
+
+def _create_guided_child(state: DesignState, search_mode: str) -> None:
+    parent = state.tree_nodes.get(state.current_node_id) if state.current_node_id else _selected_node(state)
+    if parent is None:
+        return
+    child_id = _child_id(parent.node_id, "repair" if search_mode == "Repair" else "exploit")
+    child = SearchNode(
+        node_id=child_id,
+        parent_id=parent.node_id,
+        search_mode=search_mode,
+        logic_proposals=parent.logic_proposals[:] if search_mode == "Exploitation" else [],
+        critic_feedbacks=parent.critic_feedbacks[:],
+        failed_attempts=parent.failed_attempts[:],
+        error_type=parent.error_type,
+    )
+    parent.children_ids.append(child_id)
+    state.tree_nodes[child_id] = child
+    state.active_frontier.insert(0, child_id)
+    st.session_state.selected_node_id = child_id
 
 
 def _render_pipeline(state: DesignState) -> None:
@@ -524,6 +736,12 @@ def _render_tree_workspace(state: DesignState) -> None:
         )
         return
 
+    node_ids = list(state.tree_nodes.keys())
+    default_node = st.session_state.selected_node_id or state.current_node_id or node_ids[0]
+    selected = st.selectbox("檢視節點", node_ids, index=_safe_index(node_ids, default_node))
+    st.session_state.selected_node_id = selected
+    _render_search_path_panel(state, selected)
+
     table_rows = []
     for node in state.tree_nodes.values():
         table_rows.append(
@@ -542,11 +760,6 @@ def _render_tree_workspace(state: DesignState) -> None:
         st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
     else:
         st.table(table_rows)
-
-    node_ids = list(state.tree_nodes.keys())
-    default_node = st.session_state.selected_node_id or state.current_node_id or node_ids[0]
-    selected = st.selectbox("檢視節點", node_ids, index=_safe_index(node_ids, default_node))
-    st.session_state.selected_node_id = selected
 
     node = state.tree_nodes[selected]
     mode_color = MODE_COLORS.get(node.search_mode, "#64748b")
@@ -568,6 +781,59 @@ def _render_tree_workspace(state: DesignState) -> None:
     )
 
 
+def _render_search_path_panel(state: DesignState, selected_node_id: str) -> None:
+    st.markdown('<div class="section-title">搜尋路徑與分支原因</div>', unsafe_allow_html=True)
+    summary = _search_next_step_summary(state)
+    if summary["level"] == "success":
+        st.success(summary["text"])
+    elif summary["level"] == "warning":
+        st.warning(summary["text"])
+    else:
+        st.info(summary["text"])
+
+    dot = _build_search_tree_dot(state, selected_node_id)
+    if dot:
+        st.graphviz_chart(dot, use_container_width=True)
+
+    path = _search_path_to_node(state, selected_node_id)
+    if not path:
+        st.info("目前沒有可顯示的搜尋路徑。")
+        return
+
+    st.caption("目前路徑")
+    for depth, node in enumerate(path):
+        _render_path_node_card(state, node, depth)
+
+
+def _render_path_node_card(state: DesignState, node: SearchNode, depth: int) -> None:
+    reason = _branch_reason_for_node(state, node.node_id)
+    feedback = _summarize_feedback(node.critic_feedbacks[-1] if node.critic_feedbacks else "")
+    score = "無資料" if not math.isfinite(node.score) else f"{node.score:.2f}"
+    badges = _node_state_badges(state, node)
+    mode_color = MODE_COLORS.get(node.search_mode, "#64748b")
+    status_color = STATUS_COLORS.get(node.status, "#64748b")
+    error_color = ERROR_COLORS.get(node.error_type, "#64748b")
+    mode_label = MODE_LABELS.get(node.search_mode, node.search_mode)
+    status_label = STATUS_LABELS.get(node.status, node.status)
+    error_label = ERROR_LABELS.get(node.error_type, node.error_type)
+    st.markdown(
+        f"""
+        <div class="node-card">
+            <div class="node-title">{depth + 1}. {_escape_html(node.node_id)}</div>
+            <div class="node-meta">
+                <span class="pill" style="background:{mode_color};">{mode_label}</span>
+                <span class="pill" style="background:{status_color};">{status_label}</span>
+                <span class="pill" style="background:{error_color};">{error_label}</span>
+                {badges}
+            </div>
+            <div class="node-meta">分數：{score} | 建立原因：{_escape_html(reason)}</div>
+            <div class="node-meta">評審摘要：{_escape_html(feedback or "尚無評審摘要")}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_inspector(state: DesignState) -> None:
     st.markdown('<div class="section-title">結果檢視器</div>', unsafe_allow_html=True)
     node = _selected_node(state)
@@ -579,8 +845,8 @@ def _render_inspector(state: DesignState) -> None:
         )
         return
 
-    proposal_tab, verilog_tab, topology_tab, charts_tab, critic_tab, rag_tab, raw_tab = st.tabs(
-        ["提案", "Verilog", "拓樸", "圖表", "評審", "RAG 內容", "原始狀態"]
+    proposal_tab, verilog_tab, topology_tab, ode_tab, charts_tab, critic_tab, rag_tab, raw_tab = st.tabs(
+        ["提案", "Verilog", "拓樸", "ODE 模擬", "圖表", "評審", "RAG 內容", "原始狀態"]
     )
 
     with proposal_tab:
@@ -604,22 +870,14 @@ def _render_inspector(state: DesignState) -> None:
     with topology_tab:
         topologies = node.candidate_topologies or state.candidate_topologies
         if topologies:
-            rows = [
-                {
-                    key: value
-                    for key, value in topology.items()
-                    if key not in {"verilog"}
-                }
-                for topology in topologies
-            ]
-            if pd is not None:
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            else:
-                st.table(rows)
-            st.subheader("最佳拓樸")
-            st.json(node.best_topology or state.best_topology or {})
+            best_topology = node.best_topology or state.best_topology
+            for index, topology in enumerate(topologies):
+                _render_topology_card(index, topology, best_topology)
         else:
             st.info("目前尚無拓樸候選。")
+
+    with ode_tab:
+        _render_ode_simulation_tab(node, state)
 
     with charts_tab:
         _render_topology_charts(node, state)
@@ -650,6 +908,158 @@ def _render_inspector(state: DesignState) -> None:
         st.json(asdict(node))
         with st.expander("完整 DesignState"):
             st.json(asdict(state))
+
+
+def _render_topology_card(index: int, topology: dict[str, Any], best_topology: dict[str, Any] | None) -> None:
+    candidate_label = f"候選 {int(topology.get('verilog_index', index)) + 1}"
+    is_best = topology is best_topology or (
+        best_topology is not None
+        and topology.get("verilog_index") == best_topology.get("verilog_index")
+        and topology.get("score") == best_topology.get("score")
+    )
+    status = str(topology.get("mapping_status", "unknown"))
+    best_label = " · 最佳拓樸" if is_best else ""
+    with st.container(border=True):
+        st.markdown(
+            f"""
+            <div class="topology-title">{_escape_html(candidate_label)}{best_label}</div>
+            <div class="topology-subtitle">Mapping：{_escape_html(status)} · Source：{_escape_html(str(topology.get("source", "unknown")))}</div>
+            {_topology_metrics_html(topology)}
+            """,
+            unsafe_allow_html=True,
+        )
+        if is_best:
+            st.success("目前分數最高或已選定的最佳拓樸。")
+
+        graph = _verilog_to_gate_graph(str(topology.get("verilog", "") or ""))
+        if graph["ok"]:
+            st.graphviz_chart(str(graph["dot"]), use_container_width=True)
+        else:
+            st.warning(str(graph["message"]))
+
+        if _is_failed_mapping(status) and topology.get("mapping_error_summary"):
+            st.error(str(topology["mapping_error_summary"]))
+
+        with st.expander(f"{candidate_label} 原始資料", expanded=False):
+            raw_topology = {key: value for key, value in topology.items() if key != "verilog"}
+            st.json(raw_topology)
+            if topology.get("verilog"):
+                st.markdown(f'<div class="code-panel">{_escape_html(str(topology["verilog"]))}</div>', unsafe_allow_html=True)
+
+
+def _render_ode_simulation_tab(node: SearchNode, state: DesignState) -> None:
+    topologies = node.candidate_topologies or state.candidate_topologies
+    if not topologies:
+        st.info("目前尚無拓樸候選，因此沒有 ODE 模擬圖表。")
+        return
+
+    labels = [_topology_candidate_label(index, topology) for index, topology in enumerate(topologies)]
+    selected_label = st.selectbox("檢視 ODE 候選", labels, key=f"ode_candidate_{node.node_id}")
+    selected_index = labels.index(selected_label)
+    topology = topologies[selected_index]
+    trace = topology.get("ode_trace")
+
+    status = str(topology.get("ode_status", "unknown"))
+    if status == "disabled":
+        st.info("此候選的 ODE 模擬已停用。請在左側開啟 ODE 模擬後重新執行。")
+        return
+    if status == "failed":
+        st.error("此候選的 ODE 模擬失敗，無法顯示時間序列圖。")
+        return
+    if not _valid_ode_trace(trace):
+        st.warning("此候選尚未保存 ODE 時間序列。請重新執行 ODE 模擬以產生圖表資料。")
+        _render_ode_metric_summary(topology)
+        return
+
+    _render_ode_metric_summary(topology)
+    trace_rows = _ode_trace_rows(trace)
+    if pd is not None:
+        trace_df = pd.DataFrame(trace_rows).set_index("time")
+        left, right = st.columns(2, gap="medium")
+        with left:
+            st.caption("輸出蛋白濃度")
+            st.line_chart(trace_df[["output_protein"]], use_container_width=True)
+        with right:
+            st.caption("mRNA / protein 總負擔")
+            burden_cols = [column for column in ["total_mrna", "total_protein"] if column in trace_df.columns]
+            st.line_chart(trace_df[burden_cols], use_container_width=True)
+        st.caption("資源佔用率")
+        occupancy_cols = [column for column in ["rnap_occupancy", "ribosome_occupancy"] if column in trace_df.columns]
+        st.line_chart(trace_df[occupancy_cols], use_container_width=True)
+    else:
+        st.table(trace_rows)
+
+    with st.expander("ODE trace 原始資料", expanded=False):
+        st.json(trace)
+
+
+def _render_ode_metric_summary(topology: dict[str, Any]) -> None:
+    cols = st.columns(4)
+    cols[0].metric("ODE 狀態", str(topology.get("ode_status", "unknown")))
+    cols[1].metric("Dynamic margin", _format_metric(topology.get("dynamic_margin")))
+    cols[2].metric("SNR", _format_metric(topology.get("signal_to_noise_ratio")))
+    cols[3].metric("Output CV", _format_metric(topology.get("metrics_cv")))
+
+
+def _valid_ode_trace(trace: Any) -> bool:
+    if not isinstance(trace, dict):
+        return False
+    time_values = trace.get("time")
+    output_values = trace.get("output_protein")
+    return isinstance(time_values, list) and isinstance(output_values, list) and len(time_values) == len(output_values) and len(time_values) > 0
+
+
+def _ode_trace_rows(trace: dict[str, list[float]]) -> list[dict[str, float]]:
+    time_values = trace.get("time", [])
+    rows = []
+    for index, time_value in enumerate(time_values):
+        row = {"time": float(time_value)}
+        for key in ["output_protein", "total_mrna", "total_protein", "rnap_occupancy", "ribosome_occupancy"]:
+            values = trace.get(key, [])
+            if index < len(values):
+                row[key] = float(values[index])
+        rows.append(row)
+    return rows
+
+
+def _topology_candidate_label(index: int, topology: dict[str, Any]) -> str:
+    candidate_number = int(topology.get("verilog_index", index)) + 1
+    score = topology.get("score")
+    status = topology.get("ode_status", topology.get("mapping_status", "unknown"))
+    score_text = f" · score {float(score):.2f}" if isinstance(score, int | float) else ""
+    return f"候選 {candidate_number}{score_text} · {status}"
+
+
+def _topology_metrics_html(topology: dict[str, Any]) -> str:
+    metric_keys = [
+        ("score", "Score"),
+        ("gate_count", "Gates"),
+        ("dynamic_margin", "Dynamic"),
+        ("robustness_score", "Robustness"),
+        ("orthogonality_score", "Orthogonality"),
+        ("cello_assignment_score", "Cello"),
+    ]
+    blocks = []
+    for key, label in metric_keys:
+        if key not in topology:
+            continue
+        blocks.append(
+            '<div class="topology-metric">'
+            f'<div class="topology-metric-label">{label}</div>'
+            f'<div class="topology-metric-value">{_escape_html(_format_metric(topology.get(key)))}</div>'
+            "</div>"
+        )
+    return f'<div class="topology-metrics">{"".join(blocks)}</div>' if blocks else ""
+
+
+def _format_metric(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    return "無資料" if value is None else str(value)
+
+
+def _is_failed_mapping(status: str) -> bool:
+    return status.strip().lower() in {"failed", "mapping_failed", "unmapped", "error"}
 
 
 def _render_topology_charts(node: SearchNode, state: DesignState) -> None:
@@ -877,10 +1287,29 @@ def _demo_topologies(node: SearchNode, enable_ode: bool) -> list[dict[str, Any]]
         if enable_ode:
             topology["ode_status"] = "simulated"
             topology["dynamic_margin"] = round(0.31 + index * 0.07 + mode_bonus, 3)
+            topology["ode_trace"] = _demo_ode_trace(index, mode_bonus)
         else:
             topology["ode_status"] = "disabled"
         topologies.append(topology)
     return topologies
+
+
+def _demo_ode_trace(index: int, mode_bonus: float) -> dict[str, list[float]]:
+    time_points = [0, 60, 120, 180, 240, 300, 360, 420, 480, 540, 600]
+    scale = 1.0 + index * 0.28 + mode_bonus
+    output = [round(scale * 85.0 * (1.0 - math.exp(-point / 210.0)), 3) for point in time_points]
+    total_mrna = [round(scale * 14.0 * (1.0 - math.exp(-point / 130.0)), 3) for point in time_points]
+    total_protein = [round(scale * 120.0 * (1.0 - math.exp(-point / 260.0)), 3) for point in time_points]
+    rnap_occupancy = [round(min(0.95, 0.12 + scale * 0.22 * (1.0 - math.exp(-point / 180.0))), 4) for point in time_points]
+    ribosome_occupancy = [round(min(0.95, 0.16 + scale * 0.26 * (1.0 - math.exp(-point / 220.0))), 4) for point in time_points]
+    return {
+        "time": time_points,
+        "output_protein": output,
+        "total_mrna": total_mrna,
+        "total_protein": total_protein,
+        "rnap_occupancy": rnap_occupancy,
+        "ribosome_occupancy": ribosome_occupancy,
+    }
 
 
 def _demo_critic_and_branch(state: DesignState, node: SearchNode, enable_tree_search: bool) -> None:
@@ -1013,6 +1442,314 @@ def _topology_rows(topologies: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _verilog_to_gate_graph(verilog: str) -> dict[str, Any]:
+    code = _strip_verilog_comments(verilog)
+    if not code.strip():
+        return {"ok": False, "dot": "", "message": "此拓樸沒有 Verilog，無法產生 gate graph。"}
+
+    inputs, outputs, wires = _extract_verilog_signals(code)
+    nodes: dict[str, str] = {}
+    edges: list[tuple[str, str]] = []
+    gate_index = 0
+
+    for signal in sorted(inputs):
+        nodes[signal] = "input"
+    for signal in sorted(outputs):
+        nodes[signal] = "output"
+    for signal in sorted(wires):
+        nodes.setdefault(signal, "wire")
+
+    for gate, body in re.findall(r"\b(and|or|not|nand|nor|xor|xnor)\s*\(([^;]+?)\)\s*;", code, flags=re.IGNORECASE | re.DOTALL):
+        parts = [_clean_signal_name(part) for part in body.split(",")]
+        parts = [part for part in parts if part]
+        if len(parts) < 2:
+            continue
+        output, gate_inputs = parts[0], parts[1:]
+        gate_index += 1
+        gate_node = f"{gate.upper()}_{gate_index}"
+        nodes[gate_node] = "gate"
+        nodes.setdefault(output, "wire")
+        for signal in gate_inputs:
+            nodes.setdefault(signal, "unknown")
+            edges.append((signal, gate_node))
+        edges.append((gate_node, output))
+
+    for lhs, rhs in re.findall(r"\bassign\s+([^=;]+?)\s*=\s*([^;]+?)\s*;", code, flags=re.IGNORECASE | re.DOTALL):
+        output = _clean_signal_name(lhs)
+        if not output:
+            continue
+        nodes.setdefault(output, "output" if output in outputs else "wire")
+        gate_index = _add_assign_expression_edges(output, rhs, nodes, edges, gate_index)
+
+    if not edges:
+        return {"ok": False, "dot": "", "message": "無法解析 gate graph；請展開原始資料查看 Verilog。"}
+
+    return {"ok": True, "dot": _build_gate_graph_dot(nodes, edges, inputs, outputs), "message": ""}
+
+
+def _strip_verilog_comments(verilog: str) -> str:
+    without_block = re.sub(r"/\*.*?\*/", "", verilog, flags=re.DOTALL)
+    return re.sub(r"//.*", "", without_block)
+
+
+def _extract_verilog_signals(code: str) -> tuple[set[str], set[str], set[str]]:
+    signals: dict[str, set[str]] = {"input": set(), "output": set(), "wire": set()}
+    for keyword in signals:
+        for match in re.finditer(rf"\b{keyword}\b\s*(?:\[[^\]]+\]\s*)?([^;);]+)", code, flags=re.IGNORECASE):
+            declaration = re.split(r"\b(?:input|output|wire|module|endmodule)\b", match.group(1), flags=re.IGNORECASE)[0]
+            for name in re.split(r",", declaration):
+                signal = _clean_signal_name(name)
+                if signal:
+                    signals[keyword].add(signal)
+        for match in re.finditer(rf"\b{keyword}\b\s*(?:\[[^\]]+\]\s*)?([A-Za-z_]\w*)", code, flags=re.IGNORECASE):
+            signals[keyword].add(match.group(1))
+    return signals["input"], signals["output"], signals["wire"]
+
+
+def _add_assign_expression_edges(
+    output: str,
+    expression: str,
+    nodes: dict[str, str],
+    edges: list[tuple[str, str]],
+    gate_index: int,
+) -> int:
+    expression = _strip_outer_parens(expression.strip())
+    direct = _clean_signal_name(expression)
+    if direct and direct == expression.strip():
+        nodes.setdefault(direct, "unknown")
+        edges.append((direct, output))
+        return gate_index
+
+    for operator, gate in [("&", "AND"), ("|", "OR"), ("^", "XOR")]:
+        parts = _split_expression(expression, operator)
+        if len(parts) > 1:
+            gate_index += 1
+            gate_node = f"{gate}_{gate_index}"
+            nodes[gate_node] = "gate"
+            for part in parts:
+                source, gate_index = _expression_source_node(part, nodes, edges, gate_index)
+                if source:
+                    edges.append((source, gate_node))
+            edges.append((gate_node, output))
+            return gate_index
+
+    source, gate_index = _expression_source_node(expression, nodes, edges, gate_index)
+    if source:
+        edges.append((source, output))
+    return gate_index
+
+
+def _expression_source_node(
+    expression: str,
+    nodes: dict[str, str],
+    edges: list[tuple[str, str]],
+    gate_index: int,
+) -> tuple[str | None, int]:
+    expression = _strip_outer_parens(expression.strip())
+    if expression.startswith("~") or expression.startswith("!"):
+        source = _clean_signal_name(expression[1:])
+        if not source:
+            return None, gate_index
+        gate_index += 1
+        gate_node = f"NOT_{gate_index}"
+        nodes.setdefault(source, "unknown")
+        nodes[gate_node] = "gate"
+        edges.append((source, gate_node))
+        return gate_node, gate_index
+
+    signal = _clean_signal_name(expression)
+    if signal:
+        nodes.setdefault(signal, "unknown")
+        return signal, gate_index
+    return None, gate_index
+
+
+def _split_expression(expression: str, operator: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for char in expression:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        if char == operator and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if current:
+        parts.append("".join(current).strip())
+    return [part for part in parts if part]
+
+
+def _strip_outer_parens(value: str) -> str:
+    value = value.strip()
+    while value.startswith("(") and value.endswith(")"):
+        inner = value[1:-1].strip()
+        if not inner:
+            break
+        value = inner
+    return value
+
+
+def _clean_signal_name(value: str) -> str:
+    value = re.sub(r"\b(?:input|output|wire|reg)\b", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\[[^\]]+\]", "", value)
+    match = re.search(r"[A-Za-z_]\w*", value.strip())
+    return match.group(0) if match else ""
+
+
+def _build_gate_graph_dot(nodes: dict[str, str], edges: list[tuple[str, str]], inputs: set[str], outputs: set[str]) -> str:
+    lines = [
+        "digraph GateGraph {",
+        "  graph [rankdir=LR, bgcolor=\"transparent\", pad=\"0.2\", nodesep=\"0.45\", ranksep=\"0.65\"];",
+        "  node [fontname=\"Arial\", fontsize=10, margin=\"0.08,0.05\"];",
+        "  edge [color=\"#64748b\", arrowsize=0.7];",
+    ]
+    for name, kind in sorted(nodes.items()):
+        normalized_kind = "input" if name in inputs else "output" if name in outputs else kind
+        lines.append(f"  {_dot_id(name)} [{_dot_node_attrs(name, normalized_kind)}];")
+    for source, target in edges:
+        lines.append(f"  {_dot_id(source)} -> {_dot_id(target)};")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _dot_node_attrs(name: str, kind: str) -> str:
+    label = _dot_escape(_gate_label(name))
+    if kind == "input":
+        return f'label="{label}", shape=box, style="rounded,filled", fillcolor="#dbeafe", color="#60a5fa"'
+    if kind == "output":
+        return f'label="{label}", shape=box, style="rounded,filled", fillcolor="#dcfce7", color="#34d399"'
+    if kind == "gate":
+        return f'label="{label}", shape=box, style="rounded,filled", fillcolor="#ffffff", color="#334155"'
+    return f'label="{label}", shape=ellipse, style=filled, fillcolor="#f1f5f9", color="#cbd5e1"'
+
+
+def _gate_label(name: str) -> str:
+    return re.sub(r"_\d+$", "", name) if re.match(r"^(?:AND|OR|NOT|NAND|NOR|XOR|XNOR)_\d+$", name) else name
+
+
+def _dot_id(name: str) -> str:
+    return f'"{_dot_escape(name)}"'
+
+
+def _dot_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _search_path_to_node(state: DesignState, node_id: str | None) -> list[SearchNode]:
+    if not node_id or node_id not in state.tree_nodes:
+        return []
+    path: list[SearchNode] = []
+    seen: set[str] = set()
+    current_id: str | None = node_id
+    while current_id and current_id in state.tree_nodes and current_id not in seen:
+        seen.add(current_id)
+        node = state.tree_nodes[current_id]
+        path.append(node)
+        current_id = node.parent_id
+    path.reverse()
+    return path
+
+
+def _branch_reason_for_node(state: DesignState, node_id: str) -> str:
+    node = state.tree_nodes.get(node_id)
+    if node is None:
+        return "找不到節點"
+    parent = state.tree_nodes.get(node.parent_id or "")
+    if parent is None:
+        return "搜尋起點"
+    if node.search_mode == "Repair":
+        return f"{ERROR_LABELS.get(parent.error_type, parent.error_type)} -> 修正"
+    if node.search_mode == "Exploitation":
+        return f"{ERROR_LABELS.get(parent.error_type, parent.error_type)} -> 元件最佳化"
+    if node.search_mode == "Exploration":
+        return f"{ERROR_LABELS.get(parent.error_type, parent.error_type)} -> 重新探索"
+    return f"{ERROR_LABELS.get(parent.error_type, parent.error_type)} -> {MODE_LABELS.get(node.search_mode, node.search_mode)}"
+
+
+def _search_next_step_summary(state: DesignState) -> dict[str, str]:
+    if state.requires_human_input:
+        return {"level": "warning", "text": "工作流程正在等待人工回饋。請先處理上方的人工介入面板，再繼續執行搜尋。"}
+    if state.is_completed:
+        return {"level": "success", "text": "搜尋已完成，最佳拓樸已可在結果檢視器中查看。"}
+    if state.active_frontier:
+        next_id = state.active_frontier[0]
+        reason = _branch_reason_for_node(state, next_id)
+        return {"level": "info", "text": f"下一個待處理節點：{next_id}。原因：{reason}。"}
+    return {"level": "warning", "text": "目前沒有待處理節點；若尚未完成，請補充人工限制或選擇 fallback 拓樸。"}
+
+
+def _build_search_tree_dot(state: DesignState, selected_node_id: str | None) -> str:
+    if not state.tree_nodes:
+        return ""
+    lines = [
+        "digraph SearchTree {",
+        "  graph [rankdir=TB, bgcolor=\"transparent\", pad=\"0.2\", nodesep=\"0.35\", ranksep=\"0.55\"];",
+        "  node [fontname=\"Arial\", fontsize=10, margin=\"0.10,0.06\"];",
+        "  edge [fontname=\"Arial\", fontsize=9, color=\"#94a3b8\", arrowsize=0.7];",
+    ]
+    frontier = set(state.active_frontier)
+    for node_id, node in state.tree_nodes.items():
+        lines.append(f"  {_dot_id(node_id)} [{_search_tree_node_attrs(state, node, selected_node_id, frontier)}];")
+    for node_id, node in state.tree_nodes.items():
+        for child_id in node.children_ids:
+            if child_id not in state.tree_nodes:
+                continue
+            reason = _branch_reason_for_node(state, child_id)
+            lines.append(f"  {_dot_id(node_id)} -> {_dot_id(child_id)} [label=\"{_dot_escape(reason)}\"];")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _search_tree_node_attrs(
+    state: DesignState,
+    node: SearchNode,
+    selected_node_id: str | None,
+    frontier: set[str],
+) -> str:
+    label_parts = [node.node_id, MODE_LABELS.get(node.search_mode, node.search_mode)]
+    if math.isfinite(node.score):
+        label_parts.append(f"{node.score:.2f}")
+    if node.node_id == state.current_node_id:
+        label_parts.append("current")
+    if node.node_id in frontier:
+        label_parts.append("frontier")
+    label = _dot_escape("\\n".join(label_parts))
+    fill = {
+        "Exploration": "#dbeafe",
+        "Repair": "#ffedd5",
+        "Exploitation": "#dcfce7",
+    }.get(node.search_mode, "#f1f5f9")
+    color = STATUS_COLORS.get(node.status, MODE_COLORS.get(node.search_mode, "#64748b"))
+    penwidth = "3" if node.node_id == selected_node_id else "1.6"
+    style = "rounded,filled,bold" if node.node_id in frontier or node.node_id == selected_node_id else "rounded,filled"
+    return f'label="{label}", shape=box, style="{style}", fillcolor="{fill}", color="{color}", penwidth={penwidth}'
+
+
+def _node_state_badges(state: DesignState, node: SearchNode) -> str:
+    badges = []
+    if node.node_id == state.current_node_id:
+        badges.append(("#0f172a", "目前"))
+    if node.node_id in state.active_frontier:
+        badges.append(("#0891b2", "待處理"))
+    if node.node_id == st.session_state.get("selected_node_id"):
+        badges.append(("#6366f1", "選取"))
+    return "".join(
+        f'<span class="pill" style="background:{color};">{label}</span>'
+        for color, label in badges
+    )
+
+
+def _summarize_feedback(feedback: str, limit: int = 110) -> str:
+    compact = " ".join(feedback.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
 
 
 def _current_step(state: DesignState) -> int:

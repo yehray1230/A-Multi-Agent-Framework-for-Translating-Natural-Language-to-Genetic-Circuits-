@@ -30,6 +30,11 @@ def test_ode_simulator_marks_topology_simulated_and_outputs_metrics() -> None:
     assert topology["monte_carlo_runs"] == 1
     assert "metrics_max_burden" in topology
     assert "metrics_cv" in topology
+    assert "ode_trace" in topology
+    assert len(topology["ode_trace"]["time"]) == 24
+    assert len(topology["ode_trace"]["output_protein"]) == 24
+    assert len(topology["ode_trace"]["total_mrna"]) == 24
+    assert len(topology["ode_trace"]["rnap_occupancy"]) == 24
     assert "resource_occupancy" in topology
     assert "benchmark_report" in topology
     assert topology["benchmark_report"]["robustness_score"] == topology["robustness_score"]

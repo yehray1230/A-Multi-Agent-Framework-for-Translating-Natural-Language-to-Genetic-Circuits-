@@ -206,6 +206,7 @@ class BatchODESimulator:
             return
 
         metrics = _simulation_metrics(result.y, simulation.resource_trace, params)
+        ode_trace = _simulation_trace(t_eval, result.y, simulation.resource_trace)
         if self.monte_carlo_samples > 1:
             metrics.update(self._monte_carlo_metrics(gene_count, params, t_eval))
         kinetic_score = _kinetic_score(metrics)
@@ -249,6 +250,7 @@ class BatchODESimulator:
             "metrics_max_burden": metrics["max_burden_nM"],
             "metrics_cv": metrics["output_cv"],
             "dynamic_margin": metrics["dynamic_margin"],
+            "ode_trace": ode_trace,
             "resource_occupancy": resource_occupancy,
             "parameter_provenance": parameter_provenance,
             "monte_carlo_samples": self.monte_carlo_samples,
@@ -513,6 +515,40 @@ def _simulation_metrics(y: np.ndarray, trace: list[dict[str, float]], params: di
         "burden_penalty": _sigmoid_penalty(max_burden, params["burden_soft_limit"], 0.00018),
         "toxicity_penalty": _sigmoid_penalty(max_burden, params["toxicity_threshold"], 0.00022),
     }
+
+
+def _simulation_trace(t_eval: np.ndarray, y: np.ndarray, trace: list[dict[str, float]]) -> dict[str, list[float]]:
+    midpoint = y.shape[0] // 2
+    mrna = np.maximum(y[:midpoint, :], 0.0)
+    protein = np.maximum(y[midpoint:, :], 0.0)
+    output = protein[-1, :] if protein.size else np.zeros(y.shape[1])
+    sampled_trace = _resample_resource_trace(trace, len(t_eval))
+    return {
+        "time": _round_series(t_eval),
+        "output_protein": _round_series(output),
+        "total_mrna": _round_series(np.sum(mrna, axis=0) if mrna.size else np.zeros(len(t_eval))),
+        "total_protein": _round_series(np.sum(protein, axis=0) if protein.size else np.zeros(len(t_eval))),
+        "rnap_occupancy": _round_series([entry.get("rnap_occupancy", 0.0) for entry in sampled_trace]),
+        "ribosome_occupancy": _round_series([entry.get("ribosome_occupancy", 0.0) for entry in sampled_trace]),
+    }
+
+
+def _resample_resource_trace(trace: list[dict[str, float]], target_count: int) -> list[dict[str, float]]:
+    if target_count <= 0:
+        return []
+    if not trace:
+        return [{"rnap_occupancy": 0.0, "ribosome_occupancy": 0.0} for _ in range(target_count)]
+    if len(trace) == target_count:
+        return trace
+    if target_count == 1:
+        return [trace[-1]]
+    positions = np.linspace(0, len(trace) - 1, target_count)
+    return [trace[int(round(position))] for position in positions]
+
+
+def _round_series(values: Any) -> list[float]:
+    array = np.asarray(values, dtype=float)
+    return [round(float(value), 6) for value in array.tolist()]
 
 
 def _kinetic_score(metrics: dict[str, float]) -> float:

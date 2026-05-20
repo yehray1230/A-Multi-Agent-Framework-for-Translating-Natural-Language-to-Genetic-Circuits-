@@ -18,7 +18,7 @@ The adapter reads model settings from arguments or environment variables:
 
 ```powershell
 $env:OPENAI_API_KEY="..."
-$env:LITELLM_MODEL="gpt-4o-mini"
+$env:LITELLM_MODEL="gpt-5.4-mini"
 python -m mcp_server.server
 ```
 
